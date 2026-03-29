@@ -3,8 +3,7 @@ import os
 import pandas as pd
 import random
 
-from dataset_processing import DATASET_PICKLE_PATH, SPLIT_DATASET_FOLDER, FILENAME_RANDOM, FILENAME_NOVELTY, \
-    FILENAME_TRAIN
+from dataset_processing import DATASET_PICKLE_PATH, get_dataset_filepath
 
 
 def split_dataset(
@@ -142,12 +141,9 @@ def split_dataset(
 def main():
     TAXONOMY_RANK = 'Family'  # Genus, Order, etc.
 
-    output_folder = f'{SPLIT_DATASET_FOLDER}/{TAXONOMY_RANK}'
-    if not os.path.exists(output_folder):
-        os.makedirs(output_folder)
-    output_path_novelty = f'{output_folder}/{FILENAME_NOVELTY}'
-    output_path_random = f'{output_folder}/{FILENAME_RANDOM}'
-    output_path_train = f'{output_folder}/{FILENAME_TRAIN}'
+    output_path_novelty = get_dataset_filepath(TAXONOMY_RANK, 'novelty')
+    output_path_random = get_dataset_filepath(TAXONOMY_RANK, 'random')
+    output_path_train = get_dataset_filepath(TAXONOMY_RANK, 'train')
 
     # -----------------------------
     # Load data
@@ -173,9 +169,9 @@ def main():
     train_set.to_csv(output_path_train, index=False)
 
     print("\nSaved files:")
-    print("-", FILENAME_NOVELTY)
-    print("-", FILENAME_RANDOM)
-    print("-", FILENAME_TRAIN)
+    print("-", output_path_novelty)
+    print("-", output_path_random)
+    print("-", output_path_train)
 
 
 if __name__ == '__main__':
