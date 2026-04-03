@@ -1,0 +1,56 @@
+experiment:
+  name: "hmm_logreg_family_max_aggregation_clean_run"
+  parent_experiment_name:
+  description: "HMM + Logistical Regression + max aggregation for families (clean run)"
+  random_seed: 42
+
+data:
+  dataset_pickle: "raw_data/MSL40.pkl"
+  representation: "hmm"        # hmm | pc | hybrid
+  taxon_rank: "Family"         # Family | Genus | Order | ...
+
+split:
+  novelty_fraction: 0.10
+  random_test_fraction: 0.15
+
+pair_generation:
+  k_neighbors: 10
+  k_random: 10
+  similarity_metric: "shared_count"   # shared_count | jaccard
+
+features:
+  use_intersection: true
+  use_jaccard: true
+  use_len1: true
+  use_len2: true
+  use_abs_len_diff: true
+
+model:
+  type: "logreg"              # logreg | xgboost
+
+  logreg:
+    max_iter: 1000
+    C: 1.0
+    solver: "lbfgs"
+
+  xgboost:
+    n_estimators: 200
+    max_depth: 6
+    learning_rate: 0.1
+    subsample: 0.8
+    colsample_bytree: 0.8
+    eval_metric: "logloss"
+
+training:
+  genome_split:
+    train_fraction: 0.70
+    val_fraction: 0.15
+    test_fraction: 0.15
+
+aggregation:
+  method: "max"              # mean | median | max | logit_sum | topk_mean
+  topk_values: [3]         # null = use all, or e.g. [3, 5, 10]
+
+evaluation:
+  top_k: [1, 2, 3]
+  small_family_threshold: 6
