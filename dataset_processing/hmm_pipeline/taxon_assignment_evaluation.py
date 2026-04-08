@@ -13,15 +13,18 @@ def evaluate_assignment_results(df_results, subset_name):
                 "top3": float(group["top3_correct"].mean()),
                 "mean_rank": float(group["true_rank"].mean()),
                 "median_rank": float(group["true_rank"].median()),
-                "mean_true_score": float(group["true_score"].mean()),
-                "mean_top_score": float(group["top_score"].mean()),
+
+                # use probabilities instead of raw scores
+                "mean_true_prob": float(group["true_prob"].mean()),
+                "mean_top_prob": float(group["top_prob"].mean()),
             })
 
         elif subset_name == "novelty":
             result.update({
-                "mean_top_score": float(group["top_score"].mean()),
-                "median_top_score": float(group["top_score"].median()),
-                "max_top_score": float(group["top_score"].max()),
+                # use probabilities instead of raw scores
+                "mean_top_prob": float(group["top_prob"].mean()),
+                "median_top_prob": float(group["top_prob"].median()),
+                "max_top_prob": float(group["top_prob"].max()),
             })
 
         else:

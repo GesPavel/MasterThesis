@@ -2,8 +2,8 @@ import pandas as pd
 import numpy as np
 import time
 from tqdm import tqdm
-
-from dataset_processing.hmm_data_processing import compute_features
+from scipy.special import softmax
+from dataset_processing.hmm_pipeline.hmm_data_processing import compute_features
 
 
 def _aggregate_scores(df_probabilities, method="mean", topk=None):
@@ -74,11 +74,21 @@ def _summarize_per_genome(df_scores, known_taxon=True):
         candidate_taxa = group_sorted["candidate_taxon"].tolist()
         candidate_scores = group_sorted["score"].tolist()
 
+        # -----------------------------------
+        # Convert aggregated scores into
+        # normalized taxon probabilities
+        # -----------------------------------
+        scores_array = np.array(candidate_scores, dtype=float)
+        # softmax
+        candidate_probs = np.asarray(softmax(scores_array), dtype=float)
+        top_prob = float(candidate_probs[0])
+
         row = {
             "genome_test": genome_test,
             "true_taxon": true_taxon,
             "predicted_taxon": predicted_taxon,
-            "top_score": top_score,
+            "top_score": top_score,     # raw aggregated score
+            "top_prob": top_prob,       # normalized probability
             "known_taxon": known_taxon,
         }
 
@@ -86,13 +96,16 @@ def _summarize_per_genome(df_scores, known_taxon=True):
             if true_taxon in candidate_taxa:
                 true_rank = candidate_taxa.index(true_taxon) + 1
                 true_score = candidate_scores[true_rank - 1]
+                true_prob = float(candidate_probs[true_rank - 1])
             else:
                 true_rank = None
                 true_score = None
+                true_prob = None
 
             row.update({
                 "true_rank": true_rank,
-                "true_score": true_score,
+                "true_score": true_score,   # raw aggregated score for true family
+                "true_prob": true_prob,     # normalized probability for true family
                 "top1_correct": int(true_rank == 1) if true_rank is not None else 0,
                 "top2_correct": int(true_rank is not None and true_rank <= 2),
                 "top3_correct": int(true_rank is not None and true_rank <= 3),
@@ -101,6 +114,7 @@ def _summarize_per_genome(df_scores, known_taxon=True):
             row.update({
                 "true_rank": None,
                 "true_score": None,
+                "true_prob": None,
                 "top1_correct": None,
                 "top2_correct": None,
                 "top3_correct": None,

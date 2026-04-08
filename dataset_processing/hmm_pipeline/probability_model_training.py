@@ -6,7 +6,7 @@ from sklearn.metrics import log_loss, accuracy_score, classification_report
 
 from xgboost import XGBClassifier
 
-from dataset_processing.hmm_data_processing import compute_features
+from dataset_processing.hmm_pipeline.hmm_data_processing import compute_features
 
 
 def _build_model(model_type, model_config, random_seed=42):
