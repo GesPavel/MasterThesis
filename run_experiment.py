@@ -6,6 +6,7 @@ import shutil
 import argparse
 
 from dataset_processing.hmm_pipeline.ground_truth_extraction import build_pairs_dataset
+from dataset_processing.hmm_pipeline.probability_model_calibration import calibrate_model
 from dataset_processing.hmm_pipeline.probability_model_training import train_probability_model
 from dataset_processing.hmm_pipeline.taxon_assignment import assign_taxa
 from dataset_processing.hmm_pipeline.taxon_assignment_evaluation import evaluate_assignment_results
@@ -14,7 +15,9 @@ from dataset_processing.util import load_filtered_dataframe
 from dataset_processing.paths import (
     get_split_paths,
     get_pairs_path,
+    get_val_pairs_path,
     get_model_path,
+    get_calibrated_model_path,
     get_metrics_path,
     get_assignment_results_path,
 )
@@ -60,13 +63,14 @@ def find_parent_experiment(parent_name: str) -> Path:
 # Stage definitions
 # =========================
 
-STAGES = ["split", "pairs", "train", "assign"]
+STAGES = ["split", "pairs", "train", "calibrate", "assign"]
 
 STAGE_DEPENDENCIES = {
     "split": [],
     "pairs": ["split"],
     "train": ["pairs"],
-    "assign": ["train"],
+    "calibrate": ["train"],
+    "assign": ["calibrate"],
 }
 
 
@@ -82,10 +86,13 @@ def compare_configs_for_stage(stage, current, parent):
         return _subset_equal(current, parent, ["data", "pair_generation"])
 
     if stage == "train":
-        return _subset_equal(current, parent, ["data", "features", "model", "training"])
+        return _subset_equal(current, parent, ["data", "features", "model"])
+
+    if stage == "calibrate":
+        return _subset_equal(current, parent, ["data", "features", "model", "calibration"])
 
     if stage == "assign":
-        return _subset_equal(current, parent, ["data", "features", "aggregation"])
+        return _subset_equal(current, parent, ["data", "features", "aggregation", "calibration"])
 
     return True
 
@@ -119,11 +126,25 @@ def copy_stage_outputs(stage, parent_dir, current_dir, config):
             get_pairs_path(parent_dir, rank),
             get_pairs_path(current_dir, rank)
         )
+        shutil.copy(
+            get_val_pairs_path(parent_dir, rank),
+            get_val_pairs_path(current_dir, rank)
+        )
 
     elif stage == "train":
         shutil.copy(
             get_model_path(parent_dir),
             get_model_path(current_dir)
+        )
+
+    elif stage == "calibrate":
+        shutil.copy(
+            get_calibrated_model_path(parent_dir),
+            get_calibrated_model_path(current_dir)
+        )
+        shutil.copy(
+            parent_dir / "calibration_report.txt",
+            current_dir / "calibration_report.txt"
         )
 
     elif stage == "assign":
@@ -146,15 +167,19 @@ def copy_stage_outputs(stage, parent_dir, current_dir, config):
 # =========================
 
 def run_split_stage(config: dict, exp_dir: Path):
-    print("\n=== [1/4] SPLITTING DATASET ===")
+    print("=== [1/5] SPLITTING DATASET ===")
 
     df = pd.read_pickle(config["data"]["dataset_pickle"])
+    split_config = config["split"]
 
-    novelty_test, random_test, train_set = split_dataset(
+    novelty_test, random_test, true_train, calibration_val, model_fit_val = split_dataset(
         df=df,
         taxonomy_rank=config["data"]["taxon_rank"],
-        novelty_fraction=config["split"]["novelty_fraction"],
-        random_test_fraction=config["split"]["random_test_fraction"],
+        novelty_fraction=split_config["novelty_fraction"],
+        random_test_fraction=split_config["random_test_fraction"],
+        true_train_fraction=split_config["train_fraction"],
+        calibration_val_fraction=split_config["val_fraction"],
+        novelty_fit_val_fraction=split_config["test_fraction"],
         random_seed=config["experiment"]["random_seed"]
     )
 
@@ -162,38 +187,56 @@ def run_split_stage(config: dict, exp_dir: Path):
 
     novelty_test.to_csv(paths["novelty"], index=False)
     random_test.to_csv(paths["random"], index=False)
-    train_set.to_csv(paths["train"], index=False)
+    true_train.to_csv(paths["true_train"], index=False)
+    calibration_val.to_csv(paths["calibration_val"], index=False)
+    model_fit_val.to_csv(paths["model_fit_val"], index=False)
 
 
 def run_pair_generation_stage(config: dict, exp_dir: Path):
-    print("\n=== [2/4] BUILDING GROUND TRUTH DATASET FOR PROBABILISTIC MODEL ===")
+    print("=== [2/5] BUILDING GROUND TRUTH DATASET FOR PROBABILISTIC MODEL ===")
 
     taxon_rank = config["data"]["taxon_rank"]
+    split_paths = get_split_paths(exp_dir, taxon_rank)
 
-    df_train = load_filtered_dataframe(
+    df_true_train = load_filtered_dataframe(
         config["data"]["dataset_pickle"],
-        get_split_paths(exp_dir, taxon_rank)["train"]
+        split_paths["true_train"]
+    )
+    
+    df_calibration_val = load_filtered_dataframe(
+        config["data"]["dataset_pickle"],
+        split_paths["calibration_val"]
     )
 
-    pairs_df = build_pairs_dataset(
-        df=df_train,
+    print("--- Generating pairs for true_train ---")
+    train_pairs_df = build_pairs_dataset(
+        df=df_true_train,
         rank=taxon_rank,
         k_neighbors=config["pair_generation"]["k_neighbors"],
         k_random=config["pair_generation"]["k_random"],
         random_seed=config["experiment"]["random_seed"],
     )
+    train_pairs_df.to_csv(get_pairs_path(exp_dir, taxon_rank), index=False)
 
-    pairs_df.to_csv(get_pairs_path(exp_dir, taxon_rank), index=False)
+    print("--- Generating pairs for calibration_val ---")
+    val_pairs_df = build_pairs_dataset(
+        df=df_calibration_val,
+        rank=taxon_rank,
+        k_neighbors=config["pair_generation"]["k_neighbors"],
+        k_random=config["pair_generation"]["k_random"],
+        random_seed=config["experiment"]["random_seed"],
+    )
+    val_pairs_df.to_csv(get_val_pairs_path(exp_dir, taxon_rank), index=False)
 
 
 def run_training_stage(config: dict, exp_dir: Path):
-    print("\n=== [3/4] TRAINING MODEL ===")
+    print("=== [3/5] TRAINING MODEL ===")
 
     taxon_rank = config["data"]["taxon_rank"]
 
     df_train = load_filtered_dataframe(
         config["data"]["dataset_pickle"],
-        get_split_paths(exp_dir, taxon_rank)["train"]
+        get_split_paths(exp_dir, taxon_rank)["true_train"]
     )
 
     pairs_df = pd.read_csv(get_pairs_path(exp_dir, taxon_rank))
@@ -204,7 +247,6 @@ def run_training_stage(config: dict, exp_dir: Path):
         taxon_rank=taxon_rank,
         model_type=config["model"]["type"],
         model_config=config["model"],
-        training_config=config["training"],
         feature_config=config["features"],
         random_seed=config["experiment"]["random_seed"],
     )
@@ -220,20 +262,51 @@ def run_training_stage(config: dict, exp_dir: Path):
     return model
 
 
+def run_calibration_stage(config: dict, exp_dir: Path):
+    print("=== [4/5] CALIBRATING MODEL ===")
+
+    taxon_rank = config["data"]["taxon_rank"]
+
+    df_cal_val = load_filtered_dataframe(
+        config["data"]["dataset_pickle"],
+        get_split_paths(exp_dir, taxon_rank)["calibration_val"]
+    )
+
+    model = joblib.load(get_model_path(exp_dir))
+    val_pairs = pd.read_csv(get_val_pairs_path(exp_dir, taxon_rank))
+
+    calibration_report, calibrated_model  = calibrate_model(
+        base_model=model,
+        df=df_cal_val,
+        val_pairs_df=val_pairs,
+        feature_config=config["features"],
+        calibration_config=config["calibration"]
+    )
+
+    calibrated_model_path = get_calibrated_model_path(exp_dir)
+    joblib.dump(calibrated_model, calibrated_model_path)
+
+    report_path = exp_dir / "calibration_report.txt"
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write(calibration_report)
+
+    return calibrated_model
+
+
 def run_assignment_stage(config: dict, exp_dir: Path, model):
-    print("\n=== [4/4] TAXON ASSIGNMENT ===")
+    print("=== [5/5] TAXON ASSIGNMENT ===")
 
     taxon_rank = config["data"]["taxon_rank"]
 
     df_train = load_filtered_dataframe(
         config["data"]["dataset_pickle"],
-        get_split_paths(exp_dir, taxon_rank)["train"]
+        get_split_paths(exp_dir, taxon_rank)["true_train"]
     )
 
     all_metrics = {}
 
-    for subset_name in ["random", "novelty"]:
-        print(f"\n--- Running assignment for subset: {subset_name} ---")
+    for subset_name in ["random", "novelty", "model_fit_val"]:
+        print(f"--- Running assignment for subset: {subset_name} ---")
 
         df_test = load_filtered_dataframe(
             config["data"]["dataset_pickle"],
@@ -294,7 +367,7 @@ def run_experiment(config_path: Path, stages_to_run: list):
 
     for stage in STAGES:
         if stage in stages_to_run:
-            print(f"\nRunning stage: {stage}")
+            print(f"Running stage: {stage}")
 
             if stage == "split":
                 run_split_stage(config, exp_dir)
@@ -305,13 +378,16 @@ def run_experiment(config_path: Path, stages_to_run: list):
             elif stage == "train":
                 model = run_training_stage(config, exp_dir)
 
+            elif stage == "calibrate":
+                model = run_calibration_stage(config, exp_dir)
+
             elif stage == "assign":
                 if model is None:
-                    model_path = get_model_path(exp_dir)
+                    model_path = get_calibrated_model_path(exp_dir)
                     if not model_path.exists():
                         raise FileNotFoundError(
                             f"Model file not found at {model_path}. "
-                            f"Run train stage or provide a valid parent experiment."
+                            f"Run train and calibrate stages or provide a valid parent experiment."
                         )
                     model = joblib.load(model_path)
 
@@ -321,7 +397,7 @@ def run_experiment(config_path: Path, stages_to_run: list):
             if parent_dir is not None:
                 copy_stage_outputs(stage, parent_dir, exp_dir, config)
 
-    print("\nExperiment finished successfully.")
+    print("Experiment finished successfully.")
 
 
 if __name__ == "__main__":
@@ -331,7 +407,7 @@ if __name__ == "__main__":
         "--stages",
         type=str,
         required=True,
-        help="Comma separated stages: split,pairs,train,assign"
+        help="Comma separated stages: split,pairs,train,calibrate,assign"
     )
 
     args = parser.parse_args()

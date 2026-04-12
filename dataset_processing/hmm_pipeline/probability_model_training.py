@@ -1,5 +1,6 @@
 import joblib
 import numpy as np
+import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import log_loss, accuracy_score, classification_report
@@ -67,7 +68,6 @@ def train_probability_model(
     taxon_rank,
     model_type,
     model_config,
-    training_config,
     feature_config,
     random_seed=42
 ):
@@ -76,77 +76,23 @@ def train_probability_model(
         for _, row in df.iterrows()
     }
 
-    split_cfg = training_config["genome_split"]
-    train_frac = split_cfg["train_fraction"]
-    val_frac = split_cfg["val_fraction"]
-    test_frac = split_cfg["test_fraction"]
-
-    assert abs(train_frac + val_frac + test_frac - 1.0) < 1e-6, \
-        "Train/val/test fractions must sum to 1."
-
-    all_genomes = list(genome_dict.keys())
-
-    train_genomes, temp_genomes = train_test_split(
-        all_genomes,
-        test_size=(1 - train_frac),
-        random_state=random_seed
-    )
-
-    relative_test_size = test_frac / (val_frac + test_frac)
-
-    val_genomes, test_genomes = train_test_split(
-        temp_genomes,
-        test_size=relative_test_size,
-        random_state=random_seed
-    )
-
-    train_pairs = _filter_pairs(pairs_df, train_genomes)
-    val_pairs = _filter_pairs(pairs_df, val_genomes)
-    test_pairs = _filter_pairs(pairs_df, test_genomes)
-
-    X_train, y_train, _, _ = compute_features(train_pairs, genome_dict, feature_config)
-    X_val, y_val, _, _ = compute_features(val_pairs, genome_dict, feature_config)
-    X_test, y_test, _, _ = compute_features(test_pairs, genome_dict, feature_config)
+    X_train, y_train, _, _ = compute_features(pairs_df, genome_dict, feature_config)
 
     model = _build_model(model_type, model_config, random_seed=random_seed)
     model.fit(X_train, y_train)
 
-    val_probs = model.predict_proba(X_val)[:, 1]
-    test_probs = model.predict_proba(X_test)[:, 1]
-
-    val_preds = (val_probs >= 0.5).astype(int)
-    test_preds = (test_probs >= 0.5).astype(int)
-
     report_lines = []
     report_lines.append("=" * 80)
-    report_lines.append("PAIRWISE MODEL EVALUATION REPORT")
+    report_lines.append("PAIRWISE MODEL TRAINING REPORT")
     report_lines.append("=" * 80)
     report_lines.append(f"Model: {model_type}")
     report_lines.append(f"Taxonomic rank: {taxon_rank}")
     report_lines.append("")
-    report_lines.append(f"Pairs count -> Train: {len(train_pairs)}, Val: {len(val_pairs)}, Test: {len(test_pairs)}")
-    report_lines.append(f"Feature matrix shapes -> Train: {X_train.shape}, Val: {X_val.shape}, Test: {X_test.shape}")
+    report_lines.append(f"Trained on {len(pairs_df)} pairs.")
+    report_lines.append(f"Feature matrix shape: {X_train.shape}")
     report_lines.append("")
-    report_lines.append(f"Validation LogLoss: {log_loss(y_val, val_probs):.6f}")
-    report_lines.append(f"Validation Accuracy: {accuracy_score(y_val, val_preds):.6f}")
-    report_lines.append(f"Test LogLoss: {log_loss(y_test, test_probs):.6f}")
-    report_lines.append(f"Test Accuracy: {accuracy_score(y_test, test_preds):.6f}")
-    report_lines.append("")
-    report_lines.append("Validation classification report:")
-    report_lines.append(classification_report(y_val, val_preds, digits=4))
-    report_lines.append("")
-    report_lines.append("Test classification report:")
-    report_lines.append(classification_report(y_test, test_preds, digits=4))
-    report_lines.append("")
-    report_lines.append(_describe_probs("VALIDATION", val_probs))
-    report_lines.append("")
-    report_lines.append(_describe_probs("TEST", test_probs))
+    report_lines.append("Model trained on all available data. No internal validation performed.")
 
     report_str = "\n".join(report_lines)
 
-    # Retrain on full pair dataset
-    X_all, y_all, _, _ = compute_features(pairs_df, genome_dict, feature_config)
-    final_model = _build_model(model_type, model_config, random_seed=random_seed)
-    final_model.fit(X_all, y_all)
-
-    return report_str, final_model
+    return report_str, model

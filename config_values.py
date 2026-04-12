@@ -39,3 +39,8 @@ AGGREGATION_METHODS = [
     "logit_sum",
     "topk_mean",
 ]
+
+CALIBRATION_METHODS = [
+    "sigmoid",
+    "isotonic",
+]

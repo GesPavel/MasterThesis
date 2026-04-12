@@ -12,6 +12,9 @@ data:
 split:
   novelty_fraction: 0.10
   random_test_fraction: 0.15
+  true_train_fraction: 0.70
+  calibration_val_fraction: 0.15
+  novelty_fit_val_fraction: 0.15
 
 pair_generation:
   k_neighbors: 10
@@ -42,10 +45,11 @@ model:
     eval_metric: "logloss"
 
 training:
-  genome_split:
-    train_fraction: 0.70
-    val_fraction: 0.15
-    test_fraction: 0.15
+
+calibration:
+  method: "isotonic"         # sigmoid | isotonic
+
+
 
 aggregation:
   method: "max"              # mean | median | max | logit_sum | topk_mean
