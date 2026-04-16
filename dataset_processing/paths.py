@@ -49,3 +49,10 @@ def get_config_path(exp_dir: Path) -> Path:
 
 def get_assignment_results_path(exp_dir: Path, subset_name: str) -> Path:
     return exp_dir / f"{subset_name}_assignment_results.csv"
+
+def get_probabilities_path(exp_dir: Path, subset_name: str) -> Path:
+    output_dir = ensure_dir(exp_dir / "probabilities")
+    return output_dir / f"{subset_name}_probabilities.pkl"
+
+def get_novelty_coefs_path(exp_dir: Path) -> Path:
+    return exp_dir / "novelty_coefs.json"

@@ -49,12 +49,13 @@ training:
 calibration:
   method: "isotonic"         # sigmoid | isotonic
 
-
+novelty_fit:
+  top_k: 5
 
 aggregation:
-  method: "max"              # mean | median | max | logit_sum | topk_mean
-  topk_values: [3]         # null = use all, or e.g. [3, 5, 10]
+  method: "logit_sum"              # mean | median | max | logit_sum | topk_mean
+  topk_values: [1]         # null = use all, or e.g. [3, 5, 10]
 
-evaluation:
-  top_k: [1, 2, 3]
-  small_family_threshold: 6
+#evaluation:
+#  top_k: [1, 2, 3]
+#  small_family_threshold: 6

@@ -20,6 +20,11 @@ MODEL_TYPES = [
     "xgboost",
 ]
 
+NOVELTY_FIT_MODEL_TYPES = [
+    "logreg",
+    "xgboost",
+]
+
 LOGREG_SOLVERS = [
     "lbfgs",
     "liblinear",
