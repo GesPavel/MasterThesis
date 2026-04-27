@@ -4,10 +4,9 @@ from datetime import datetime
 import json
 import shutil
 import argparse
-import numpy as np
 
 from dataset_processing.hmm_pipeline.ground_truth_extraction import build_pairs_dataset
-from dataset_processing.hmm_pipeline.novelty_fit import get_novelty_coefficients
+from dataset_processing.hmm_pipeline.novelty_fit import get_novelty_threshold
 from dataset_processing.hmm_pipeline.probability_model_calibration import calibrate_model
 from dataset_processing.hmm_pipeline.probability_model_training import train_probability_model
 from dataset_processing.hmm_pipeline.probability_prediction import predict_probabilities
@@ -24,9 +23,8 @@ from dataset_processing.paths import (
     get_metrics_path,
     get_assignment_results_path,
     get_probabilities_path,
-    get_novelty_coefs_path
+    get_novelty_threshold_path, get_known_taxa_path
 )
-from sklearn.linear_model import LogisticRegression
 import pandas as pd
 import joblib
 
@@ -68,7 +66,7 @@ def find_parent_experiment(parent_name: str) -> Path:
 # Stage definitions
 # =========================
 
-STAGES = ["split", "pairs", "train", "calibrate", "probability_prediction", "novelty_fit", "assign", "eval"]
+STAGES = ["split", "pairs", "train", "calibrate", "probability_prediction", "assign", "novelty_fit", "eval"]
 
 STAGE_DEPENDENCIES = {
     "split": [],
@@ -76,9 +74,9 @@ STAGE_DEPENDENCIES = {
     "train": ["pairs"],
     "calibrate": ["train"],
     "probability_prediction": ["calibrate"],
-    "novelty_fit": ["probability_prediction"],
     "assign": ["probability_prediction"],
-    "eval": ["assign"],
+    "novelty_fit": ["assign"],
+    "eval": ["assign", "novelty_fit"],
 }
 
 
@@ -102,13 +100,13 @@ def compare_configs_for_stage(stage, current, parent):
     if stage == "probability_prediction":
         return _subset_equal(current, parent, ["data", "features", "model", "calibration"])
 
+    if stage == "assign":
+        return _subset_equal(current, parent, ["data", "features", "aggregation", "calibration"])
+
     if stage == "novelty_fit":
         return _subset_equal(current, parent, ["data", "features", "model", "calibration", "novelty_fit"])
 
-    if stage == "assignment":
-        return _subset_equal(current, parent, ["data", "features", "aggregation", "calibration"])
-
-    if stage == "evaluation":
+    if stage == "eval":
         return _subset_equal(current, parent, ["data", "features", "aggregation", "calibration"]) #TODO: Add evaluation
 
     return True
@@ -138,6 +136,11 @@ def copy_stage_outputs(stage, parent_dir, current_dir, config):
         for key in parent_paths:
             shutil.copy(parent_paths[key], current_paths[key])
 
+        shutil.copy(
+            get_known_taxa_path(parent_dir),
+            get_known_taxa_path(current_dir)
+        )
+
     elif stage == "pairs":
         shutil.copy(
             get_pairs_path(parent_dir, rank),
@@ -165,26 +168,26 @@ def copy_stage_outputs(stage, parent_dir, current_dir, config):
         )
         
     elif stage == "probability_prediction":
-        for subset_name in ["random", "novelty", "model_fit_val"]:
+        for subset_name in ["random", "novelty", "model_fit"]:
             shutil.copy(
                 get_probabilities_path(parent_dir, subset_name),
                 get_probabilities_path(current_dir, subset_name)
             )
-            
-    elif stage == "novelty_fit":
-        shutil.copy(
-            get_novelty_coefs_path(parent_dir),
-            get_novelty_coefs_path(current_dir)
-        )
 
-    elif stage == "assignment":
-        for subset_name in ["random", "novelty", "model_fit_val"]:
+    elif stage == "assign":
+        for subset_name in ["random", "novelty", "model_fit"]:
             shutil.copy(
                 get_assignment_results_path(parent_dir, subset_name),
                 get_assignment_results_path(current_dir, subset_name)
             )
+            
+    elif stage == "novelty_fit":
+        shutil.copy(
+            get_novelty_threshold_path(parent_dir),
+            get_novelty_threshold_path(current_dir)
+        )
 
-    elif stage == "evaluation":
+    elif stage == "eval":
         shutil.copy(
             get_metrics_path(parent_dir),
             get_metrics_path(current_dir)
@@ -201,14 +204,14 @@ def run_split_stage(config: dict, exp_dir: Path):
     df = pd.read_pickle(config["data"]["dataset_pickle"])
     split_config = config["split"]
 
-    novelty_test, random_test, true_train, calibration_val, model_fit_val = split_dataset(
+    novelty_test, random_test, true_train, calibration, model_fit, known_taxa = split_dataset(
         df=df,
         taxonomy_rank=config["data"]["taxon_rank"],
-        novelty_fraction=split_config["novelty_fraction"],
+        novelty_test_fraction=split_config["novelty_test_fraction"],
         random_test_fraction=split_config["random_test_fraction"],
         true_train_fraction=split_config["true_train_fraction"],
-        calibration_val_fraction=split_config["calibration_val_fraction"],
-        novelty_fit_val_fraction=split_config["novelty_fit_val_fraction"],
+        calibration_fraction=split_config["calibration_fraction"],
+        novelty_fit_fraction=split_config["novelty_fit_fraction"],
         random_seed=config["experiment"]["random_seed"]
     )
 
@@ -217,8 +220,11 @@ def run_split_stage(config: dict, exp_dir: Path):
     novelty_test.to_csv(paths["novelty"], index=False)
     random_test.to_csv(paths["random"], index=False)
     true_train.to_csv(paths["true_train"], index=False)
-    calibration_val.to_csv(paths["calibration_val"], index=False)
-    model_fit_val.to_csv(paths["model_fit_val"], index=False)
+    calibration.to_csv(paths["calibration"], index=False)
+    model_fit.to_csv(paths["model_fit"], index=False)
+
+    known_taxa_path = get_known_taxa_path(exp_dir)
+    known_taxa.to_csv(known_taxa_path, index=False)
 
 
 def run_pair_generation_stage(config: dict, exp_dir: Path):
@@ -232,9 +238,9 @@ def run_pair_generation_stage(config: dict, exp_dir: Path):
         split_paths["true_train"]
     )
     
-    df_calibration_val = load_filtered_dataframe(
+    df_calibration = load_filtered_dataframe(
         config["data"]["dataset_pickle"],
-        split_paths["calibration_val"]
+        split_paths["calibration"]
     )
 
     print("--- Generating pairs for true_train ---")
@@ -247,9 +253,9 @@ def run_pair_generation_stage(config: dict, exp_dir: Path):
     )
     train_pairs_df.to_csv(get_pairs_path(exp_dir, taxon_rank), index=False)
 
-    print("--- Generating pairs for calibration_val ---")
+    print("--- Generating pairs for calibration ---")
     val_pairs_df = build_pairs_dataset(
-        df=df_calibration_val,
+        df=df_calibration,
         rank=taxon_rank,
         k_neighbors=config["pair_generation"]["k_neighbors"],
         k_random=config["pair_generation"]["k_random"],
@@ -298,7 +304,7 @@ def run_calibration_stage(config: dict, exp_dir: Path):
 
     df_cal_val = load_filtered_dataframe(
         config["data"]["dataset_pickle"],
-        get_split_paths(exp_dir, taxon_rank)["calibration_val"]
+        get_split_paths(exp_dir, taxon_rank)["calibration"]
     )
 
     model = joblib.load(get_model_path(exp_dir))
@@ -332,7 +338,7 @@ def run_probability_prediction_stage(config: dict, exp_dir: Path, model):
         get_split_paths(exp_dir, taxon_rank)["true_train"]
     )
 
-    for subset_name in ["random", "novelty", "model_fit_val"]:
+    for subset_name in ["random", "novelty", "model_fit"]:
         print(f"--- Predicting probabilities for subset: {subset_name} ---")
 
         df_test = load_filtered_dataframe(
@@ -352,61 +358,60 @@ def run_probability_prediction_stage(config: dict, exp_dir: Path, model):
         df_probabilities.to_pickle(prob_path)
 
 
-def run_novelty_fit_stage(config: dict, exp_dir: Path):
-    print("=== [6/8] NOVELTY FIT ===")
-
-    top_k = config["novelty_fit"]["top_k"]
-    prob_path = get_probabilities_path(exp_dir, "model_fit_val")
-    df_probabilities = pd.read_pickle(prob_path)
-
-
-    coefs = get_novelty_coefficients(df_probabilities, top_k)
-
-    coefs_path = get_novelty_coefs_path(exp_dir)
-    with open(coefs_path, "w") as f:
-        json.dump(coefs, f, indent=2)
-
-    print(f"    Novelty fit complete. Intercept: {coefs['a']:.4f}, Coef: {coefs['b']:.4f}")
-    return coefs
-
-
 def run_assignment_stage(config: dict, exp_dir: Path):
-    print("=== [7/8] TAXON ASSIGNMENT ===")
-    coefs_path = get_novelty_coefs_path(exp_dir)
-    with open(coefs_path, "r") as f:
-        novelty_coeffs = json.load(f)
+    print("=== [6/8] TAXON ASSIGNMENT ===")
 
-    for subset_name in ["random", "novelty"]:
+    for subset_name in ["random", "novelty", "model_fit"]:
         print(f"--- Running assignment for subset: {subset_name} ---")
-        
+
         prob_path = get_probabilities_path(exp_dir, subset_name)
         df_probabilities = pd.read_pickle(prob_path)
 
-        known_taxon = (subset_name == "random")
+        known_taxa_path = get_known_taxa_path(exp_dir)
+        known_taxa = pd.read_csv(known_taxa_path)
 
         df_results = aggregate_and_summarize(
             df_probabilities=df_probabilities,
-            novelty_coeffs=novelty_coeffs,
             aggregation_config=config["aggregation"],
-            known_taxon=known_taxon
+            known_taxa=known_taxa,
         )
 
         results_path = get_assignment_results_path(exp_dir, subset_name)
         df_results.to_csv(results_path, index=False)
 
 
+def run_novelty_fit_stage(config: dict, exp_dir: Path):
+    print("=== [7/8] NOVELTY FIT ===")
+
+    results_path = get_assignment_results_path(exp_dir, "model_fit")
+    df_results = pd.read_csv(results_path)
+
+    optimization_metric = config["novelty"]['optimization_metric']
+    threshold, _ = get_novelty_threshold(df_results, metric=optimization_metric)
+
+    threshold_path = get_novelty_threshold_path(exp_dir)
+    with open(threshold_path, "w") as f:
+        json.dump(threshold, f, indent=2)
+
+    print(f"    Novelty fit complete. Optimal threshold: {threshold}")
+
+
+
 def run_evaluation_stage(config: dict, exp_dir: Path):
     print("=== [8/8] EVALUATION ===")
-    
-    all_metrics = {}
 
+    threshold_path = get_novelty_threshold_path(exp_dir)
+    with open(threshold_path, "r") as f:
+        threshold = json.load(f)
+
+    all_metrics = {}
     for subset_name in ["random", "novelty"]:
         print(f"--- Evaluating subset: {subset_name} ---")
         
         results_path = get_assignment_results_path(exp_dir, subset_name)
         df_results = pd.read_csv(results_path)
 
-        metrics = evaluate_assignment_results(df_results, subset_name)
+        metrics = evaluate_assignment_results(df_results, 0.5, subset_name)
         all_metrics[subset_name] = metrics
 
     with open(get_metrics_path(exp_dir), "w") as f:
@@ -472,11 +477,11 @@ def run_experiment(config_path: Path, stages_to_run: list):
 
                 run_probability_prediction_stage(config, exp_dir, model)
 
-            elif stage == "novelty_fit":
-                run_novelty_fit_stage(config, exp_dir)
-
             elif stage == "assign":
                 run_assignment_stage(config, exp_dir)
+
+            elif stage == "novelty_fit":
+                run_novelty_fit_stage(config, exp_dir)
 
             elif stage == "eval":
                 run_evaluation_stage(config, exp_dir)
@@ -495,7 +500,7 @@ if __name__ == "__main__":
         "--stages",
         type=str,
         required=True,
-        help="Comma separated stages: split,pairs,train,calibrate,probability_prediction,novelty_fit,assignment,evaluation"
+        help="Comma separated stages: split,pairs,train,calibrate,probability_prediction,assign,novelty_fit,eval"
     )
 
     args = parser.parse_args()

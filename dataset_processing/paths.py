@@ -17,9 +17,12 @@ def get_split_paths(exp_dir: Path, rank: str) -> dict:
         "novelty": split_dir / "novelty.csv",
         "random": split_dir / "random.csv",
         "true_train": split_dir / "true_train.csv",
-        "calibration_val": split_dir / "calibration_val.csv",
-        "model_fit_val": split_dir / "model_fit_val.csv",
+        "calibration": split_dir / "calibration_val.csv",
+        "model_fit": split_dir / "model_fit_val.csv",
     }
+
+def get_known_taxa_path(exp_dir: Path) -> Path:
+    return exp_dir / "known_taxa.csv"
 
 
 def get_pairs_path(exp_dir: Path, rank: str) -> Path:
@@ -54,5 +57,5 @@ def get_probabilities_path(exp_dir: Path, subset_name: str) -> Path:
     output_dir = ensure_dir(exp_dir / "probabilities")
     return output_dir / f"{subset_name}_probabilities.pkl"
 
-def get_novelty_coefs_path(exp_dir: Path) -> Path:
-    return exp_dir / "novelty_coefs.json"
+def get_novelty_threshold_path(exp_dir: Path) -> Path:
+    return exp_dir / "novelty_threshold.json"

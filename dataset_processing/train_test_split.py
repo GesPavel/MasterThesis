@@ -6,23 +6,37 @@ from sklearn.model_selection import train_test_split as sk_train_test_split
 def split_dataset(
     df,
     taxonomy_rank,
-    novelty_fraction=0.10,
-    random_test_fraction=0.15,
-    true_train_fraction=0.7,
-    calibration_val_fraction=0.15,
-    novelty_fit_val_fraction=0.15,
+    novelty_test_fraction,
+    random_test_fraction,
+    true_train_fraction,
+    calibration_fraction,
+    novelty_fit_fraction,
     random_seed=42
 ):
     random.seed(random_seed)
 
+    ID_COL = "Accession"
+
     # -----------------------------
-    # 1. Filter Unknown taxa
+    # 0. Check fractions sum to 1
+    # -----------------------------
+    total_fraction = (
+        novelty_test_fraction
+        + random_test_fraction
+        + true_train_fraction
+        + calibration_fraction
+        + novelty_fit_fraction
+    )
+    assert abs(total_fraction - 1.0) < 1e-6, "Fractions must sum to 1."
+
+    # -----------------------------
+    # 1. Filter unknown taxa
     # -----------------------------
     df = df[df[taxonomy_rank].notna()]
-    df = df[df[taxonomy_rank] != 'Unknown']
+    df = df[df[taxonomy_rank] != "Unknown"]
     total_genomes = len(df)
 
-    print(f"    After filtering Unknown {taxonomy_rank}s, total genomes: {total_genomes}")
+    print(f"Total genomes after filtering: {total_genomes}")
 
     # -----------------------------
     # 2. Compute taxon sizes + buckets
@@ -32,17 +46,14 @@ def split_dataset(
     total = taxon_sizes.sum()
     cum_frac = taxon_sizes.cumsum() / total
 
-    # Define buckets
     large = taxon_sizes[cum_frac <= 0.2]
     medium = taxon_sizes[(cum_frac > 0.2) & (cum_frac <= 0.5)]
     small = taxon_sizes[cum_frac > 0.5]
 
-    print(f"    Buckets: large={len(large)}, medium={len(medium)}, small={len(small)}")
-
     # -----------------------------
-    # 3. Select novelty taxa (bucket-aware)
+    # 3. Select novelty taxa
     # -----------------------------
-    target_size = int(total_genomes * novelty_fraction)
+    target_size = int(total_genomes * novelty_test_fraction)
 
     selected_taxa = []
     current_size = 0
@@ -53,28 +64,19 @@ def split_dataset(
         (small, 0.4),
     ]
 
-    taxon_to_bucket = {}
-
-    for t in large.index:
-        taxon_to_bucket[t] = 'large'
-    for t in medium.index:
-        taxon_to_bucket[t] = 'medium'
-    for t in small.index:
-        taxon_to_bucket[t] = 'small'
-
     for bucket, fraction in bucket_plan:
-        bucket_taxa = bucket.index.tolist()
-        random.shuffle(bucket_taxa)
+        taxa_list = bucket.index.tolist()
+        random.shuffle(taxa_list)
 
         bucket_target = int(target_size * fraction)
         bucket_size = 0
 
-        for taxon in bucket_taxa:
+        for taxon in taxa_list:
             selected_taxa.append(taxon)
-            taxon_size = taxon_sizes[taxon]
+            size = taxon_sizes[taxon]
 
-            current_size += taxon_size
-            bucket_size += taxon_size
+            current_size += size
+            bucket_size += size
 
             if bucket_size >= bucket_target or current_size >= target_size:
                 break
@@ -82,88 +84,113 @@ def split_dataset(
         if current_size >= target_size:
             break
 
-    # -----------------------------
-    # 4. Build novelty test set
-    # -----------------------------
-    novelty_mask = df[taxonomy_rank].isin(selected_taxa)
-
-    novelty_test = df[novelty_mask].copy()
-    remaining = df[~novelty_mask].copy()
-
-    print(
-        f"    Selected {len(selected_taxa)} units of rank {taxonomy_rank} for novelty test, "
-        f"total genomes in novelty set: {current_size} ({current_size / total_genomes:.2%})"
-    )
+    novel_taxa = set(selected_taxa)
+    seen_taxa = set(df[taxonomy_rank]) - novel_taxa
 
     # -----------------------------
-    # 5. Stratified random test set
+    # 4. Build novelty_test (ONLY unseen taxa)
     # -----------------------------
-    random_test = remaining.groupby(
-        taxonomy_rank,
-        group_keys=False
+    novelty_test = df[df[taxonomy_rank].isin(novel_taxa)].copy()
+
+    # -----------------------------
+    # 5. Seen-only dataframe
+    # -----------------------------
+    seen_df = df[df[taxonomy_rank].isin(seen_taxa)].copy()
+
+    # -----------------------------
+    # 6. Random test (ONLY seen taxa)
+    # -----------------------------
+    random_test = seen_df.groupby(
+        taxonomy_rank, group_keys=False
     ).sample(
-        frac=random_test_fraction,
+        frac=random_test_fraction / (1 - novelty_test_fraction),
         random_state=random_seed
     )
 
     # -----------------------------
-    # 6. Train set
+    # 7. Train pool (seen taxa only)
     # -----------------------------
-    train_set = remaining.drop(random_test.index)
-    print(f"    Initial train set size: {len(train_set)} genomes")
+    train_pool = seen_df.drop(random_test.index)
 
     # -----------------------------
-    # 6.1. Further split the train set
+    # 8. Split train pool into:
+    #    true_train, calibration, novelty_fit_seen
     # -----------------------------
-    ID_COL = 'Accession'
-    
-    assert abs(true_train_fraction + calibration_val_fraction + novelty_fit_val_fraction - 1.0) < 1e-6, \
-        "Train/val/test fractions must sum to 1."
+    remaining_fraction = (
+        true_train_fraction + calibration_fraction + novelty_fit_fraction
+    )
 
-    all_train_genomes = train_set[ID_COL].unique()
+    rel_true = true_train_fraction / remaining_fraction
+    rel_calib = calibration_fraction / remaining_fraction
+    rel_novel_fit = novelty_fit_fraction / remaining_fraction
 
-    true_train_genomes, temp_genomes = sk_train_test_split(
-        all_train_genomes,
-        test_size=(1 - true_train_fraction),
+    genomes = train_pool[ID_COL].unique()
+
+    true_train_genomes, temp = sk_train_test_split(
+        genomes,
+        test_size=(1 - rel_true),
         random_state=random_seed
     )
 
-    relative_test_size = novelty_fit_val_fraction / (calibration_val_fraction + novelty_fit_val_fraction)
-
-    calibration_val_genomes, model_fit_val_genomes = sk_train_test_split(
-        temp_genomes,
-        test_size=relative_test_size,
+    calib_genomes, novelty_fit_seen_genomes = sk_train_test_split(
+        temp,
+        test_size=rel_novel_fit / (rel_calib + rel_novel_fit),
         random_state=random_seed
     )
-    
-    true_train = train_set[train_set[ID_COL].isin(true_train_genomes)]
-    calibration_val = train_set[train_set[ID_COL].isin(calibration_val_genomes)]
-    model_fit_val = train_set[train_set[ID_COL].isin(model_fit_val_genomes)]
+
+    true_train = train_pool[train_pool[ID_COL].isin(true_train_genomes)]
+    calibration = train_pool[train_pool[ID_COL].isin(calib_genomes)]
+    novelty_fit_seen = train_pool[
+        train_pool[ID_COL].isin(novelty_fit_seen_genomes)
+    ]
 
     # -----------------------------
-    # 7. Print sanity checks
+    # 9. Build novelty_fit (50% seen / 50% unseen)
     # -----------------------------
-    print("Total genomes:", total_genomes)
-    print("Novelty test:", len(novelty_test), f"({len(novelty_test) / total_genomes:.2%})")
-    print("Random test:", len(random_test), f"({len(random_test) / total_genomes:.2%})")
-    print("True train set:", len(true_train), f"({len(true_train) / total_genomes:.2%})")
-    print("Calibration val set:", len(calibration_val), f"({len(calibration_val) / total_genomes:.2%})")
-    print("Model fit val set:", len(model_fit_val), f"({len(model_fit_val) / total_genomes:.2%})")
+    n_seen = len(novelty_fit_seen)
 
-    print(f"\nTotal number of taxa ranked as {taxonomy_rank} in novelty set:", len(selected_taxa))
-    print("Overlap check:",
-          len(set(novelty_test.index) & set(random_test.index)) == 0)
+    novelty_fit_unseen = novelty_test.sample(
+        n=n_seen,
+        random_state=random_seed,
+        replace=len(novelty_test) < n_seen
+    )
+
+    novelty_fit = pd.concat(
+        [novelty_fit_seen, novelty_fit_unseen],
+        ignore_index=True
+    )
 
     # -----------------------------
-    # 8. Reduce output columns
+    # 10. Print summary
     # -----------------------------
-    
-    novelty_out = novelty_test[[ID_COL, taxonomy_rank]].copy()
-    novelty_out['bucket'] = novelty_out[taxonomy_rank].map(taxon_to_bucket)
+    def frac(x):
+        return f"{len(x)} ({len(x)/total_genomes:.2%})"
 
-    random_out = random_test[[ID_COL, taxonomy_rank]].copy()
-    train_out = true_train[[ID_COL, taxonomy_rank]].copy()
-    calibration_val_out = calibration_val[[ID_COL, taxonomy_rank]].copy()
-    model_fit_val_out = model_fit_val[[ID_COL, taxonomy_rank]].copy()
+    print("\n--- FINAL SPLIT ---")
+    print("Novelty test:", frac(novelty_test))
+    print("Random test:", frac(random_test))
+    print("True train:", frac(true_train))
+    print("Calibration:", frac(calibration))
+    print("Novelty fit:", frac(novelty_fit))
 
-    return novelty_out, random_out, train_out, calibration_val_out, model_fit_val_out
+    # -
+    # 11. Determine known taxa for downstream usage
+    # -
+    known_taxa = set(true_train[taxonomy_rank]) \
+                 | set(calibration[taxonomy_rank]) \
+                 | set(novelty_fit_seen[taxonomy_rank])
+    known_taxa_df = pd.DataFrame({"taxon": list(known_taxa)})
+
+    # -----------------------------
+    # 12. Output
+    # -----------------------------
+
+
+    return (
+        novelty_test,
+        random_test,
+        true_train,
+        calibration,
+        novelty_fit,
+        known_taxa_df
+    )

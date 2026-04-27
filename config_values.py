@@ -49,3 +49,10 @@ CALIBRATION_METHODS = [
     "sigmoid",
     "isotonic",
 ]
+
+NOVELTY_METRICS = [
+    "f1",
+    "precision",
+    "recall",
+    "accuracy",
+]

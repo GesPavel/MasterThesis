@@ -10,11 +10,11 @@ data:
   taxon_rank: "Family"         # Family | Genus | Order | ...
 
 split:
-  novelty_fraction: 0.10
+  novelty_test_fraction: 0.10
   random_test_fraction: 0.15
-  true_train_fraction: 0.70
-  calibration_val_fraction: 0.15
-  novelty_fit_val_fraction: 0.15
+  true_train_fraction: 0.55
+  calibration_fraction: 0.10
+  novelty_fit_fraction: 0.10
 
 pair_generation:
   k_neighbors: 10
@@ -49,13 +49,12 @@ training:
 calibration:
   method: "isotonic"         # sigmoid | isotonic
 
-novelty_fit:
-  top_k: 5
-
 aggregation:
   method: "logit_sum"              # mean | median | max | logit_sum | topk_mean
   topk_values: [1]         # null = use all, or e.g. [3, 5, 10]
 
+novelty:
+  optimization_metric: "accuracy"  # f1 | precision | recall | accuracy
 #evaluation:
 #  top_k: [1, 2, 3]
 #  small_family_threshold: 6
