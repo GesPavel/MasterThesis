@@ -13,6 +13,7 @@ from dataset_processing.hmm_pipeline.probability_prediction import predict_proba
 from dataset_processing.hmm_pipeline.taxon_assignment import aggregate_and_summarize
 from dataset_processing.hmm_pipeline.taxon_assignment_evaluation import evaluate_assignment_results
 from dataset_processing.train_test_split import split_dataset
+from dataset_processing.train_test_split_MSL41 import split_dataset_msl41
 from dataset_processing.util import load_filtered_dataframe
 from dataset_processing.paths import (
     get_split_paths,
@@ -107,7 +108,8 @@ def compare_configs_for_stage(stage, current, parent):
         return _subset_equal(current, parent, ["data", "features", "model", "calibration", "novelty_fit"])
 
     if stage == "eval":
-        return _subset_equal(current, parent, ["data", "features", "aggregation", "calibration"]) #TODO: Add evaluation
+        return _subset_equal(current, parent,
+                             ["data", "features", "aggregation", "calibration"])  # TODO: Add evaluation
 
     return True
 
@@ -166,7 +168,7 @@ def copy_stage_outputs(stage, parent_dir, current_dir, config):
             parent_dir / "calibration_report.txt",
             current_dir / "calibration_report.txt"
         )
-        
+
     elif stage == "probability_prediction":
         for subset_name in ["random", "novelty", "model_fit"]:
             shutil.copy(
@@ -180,7 +182,7 @@ def copy_stage_outputs(stage, parent_dir, current_dir, config):
                 get_assignment_results_path(parent_dir, subset_name),
                 get_assignment_results_path(current_dir, subset_name)
             )
-            
+
     elif stage == "novelty_fit":
         shutil.copy(
             get_novelty_threshold_path(parent_dir),
@@ -201,21 +203,53 @@ def copy_stage_outputs(stage, parent_dir, current_dir, config):
 def run_split_stage(config: dict, exp_dir: Path):
     print("=== [1/8] SPLITTING DATASET ===")
 
-    df = pd.read_pickle(config["data"]["dataset_pickle"])
+    data_config = config["data"]
+    dataset_type = data_config.get("dataset_type", "single")
+
+    df = pd.read_pickle(data_config["dataset_pickle"])
     split_config = config["split"]
 
-    novelty_test, random_test, true_train, calibration, model_fit, known_taxa = split_dataset(
-        df=df,
-        taxonomy_rank=config["data"]["taxon_rank"],
-        novelty_test_fraction=split_config["novelty_test_fraction"],
-        random_test_fraction=split_config["random_test_fraction"],
-        true_train_fraction=split_config["true_train_fraction"],
-        calibration_fraction=split_config["calibration_fraction"],
-        novelty_fit_fraction=split_config["novelty_fit_fraction"],
-        random_seed=config["experiment"]["random_seed"]
-    )
+    if dataset_type == "single":
+        novelty_test, random_test, true_train, calibration, model_fit, known_taxa = split_dataset(
+            df=df,
+            taxonomy_rank=data_config["taxon_rank"],
+            novelty_test_fraction=split_config["novelty_test_fraction"],
+            random_test_fraction=split_config["random_test_fraction"],
+            true_train_fraction=split_config["true_train_fraction"],
+            calibration_fraction=split_config["calibration_fraction"],
+            novelty_fit_fraction=split_config["novelty_fit_fraction"],
+            random_seed=config["experiment"]["random_seed"],
+        )
+    elif dataset_type == "dual":
+        secondary_path = data_config.get("dataset_pickle_secondary")
+        if not secondary_path:
+            raise ValueError(
+                "dataset_pickle_secondary is required when dataset_type is 'dual'."
+            )
+        if secondary_path == data_config["dataset_pickle"]:
+            raise ValueError(
+                "dataset_pickle_secondary must be different from dataset_pickle."
+            )
 
-    paths = get_split_paths(exp_dir, config["data"]["taxon_rank"])
+        df_secondary = pd.read_pickle(secondary_path)
+
+        novelty_test, random_test, true_train, calibration, model_fit, known_taxa = split_dataset_msl41(
+            df_primary=df,
+            df_secondary=df_secondary,
+            taxonomy_rank=data_config["taxon_rank"],
+            novelty_test_fraction=split_config["novelty_test_fraction"],
+            random_test_fraction=split_config["random_test_fraction"],
+            true_train_fraction=split_config["true_train_fraction"],
+            calibration_fraction=split_config["calibration_fraction"],
+            novelty_fit_fraction=split_config["novelty_fit_fraction"],
+            random_seed=config["experiment"]["random_seed"],
+        )
+    else:
+        raise ValueError(
+            f"Invalid dataset_type '{dataset_type}'. Use 'single' or 'dual'."
+        )
+
+    paths = get_split_paths(exp_dir, data_config["taxon_rank"])
 
     novelty_test.to_csv(paths["novelty"], index=False)
     random_test.to_csv(paths["random"], index=False)
@@ -237,7 +271,7 @@ def run_pair_generation_stage(config: dict, exp_dir: Path):
         config["data"]["dataset_pickle"],
         split_paths["true_train"]
     )
-    
+
     df_calibration = load_filtered_dataframe(
         config["data"]["dataset_pickle"],
         split_paths["calibration"]
@@ -310,7 +344,7 @@ def run_calibration_stage(config: dict, exp_dir: Path):
     model = joblib.load(get_model_path(exp_dir))
     val_pairs = pd.read_csv(get_val_pairs_path(exp_dir, taxon_rank))
 
-    calibration_report, calibrated_model  = calibrate_model(
+    calibration_report, calibrated_model = calibrate_model(
         base_model=model,
         df=df_cal_val,
         val_pairs_df=val_pairs,
@@ -387,14 +421,15 @@ def run_novelty_fit_stage(config: dict, exp_dir: Path):
     df_results = pd.read_csv(results_path)
 
     optimization_metric = config["novelty"]['optimization_metric']
-    threshold, _ = get_novelty_threshold(df_results, metric=optimization_metric)
+    use_normalized_probs = config["novelty"]['use_normalized_probabilities']
+    threshold, _ = get_novelty_threshold(df_results, metric=optimization_metric,
+                                         use_normalized_probs=use_normalized_probs)
 
     threshold_path = get_novelty_threshold_path(exp_dir)
     with open(threshold_path, "w") as f:
         json.dump(threshold, f, indent=2)
 
     print(f"    Novelty fit complete. Optimal threshold: {threshold}")
-
 
 
 def run_evaluation_stage(config: dict, exp_dir: Path):
@@ -404,14 +439,16 @@ def run_evaluation_stage(config: dict, exp_dir: Path):
     with open(threshold_path, "r") as f:
         threshold = json.load(f)
 
+    use_normalized_probs = config["novelty"]['use_normalized_probabilities']
+
     all_metrics = {}
     for subset_name in ["random", "novelty"]:
         print(f"--- Evaluating subset: {subset_name} ---")
-        
+
         results_path = get_assignment_results_path(exp_dir, subset_name)
         df_results = pd.read_csv(results_path)
 
-        metrics = evaluate_assignment_results(df_results, 0.5, subset_name)
+        metrics = evaluate_assignment_results(df_results, threshold, use_normalized_probs, subset_name)
         all_metrics[subset_name] = metrics
 
     with open(get_metrics_path(exp_dir), "w") as f:

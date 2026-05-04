@@ -1,4 +1,4 @@
-def evaluate_assignment_results(df_results, novelty_threshold, subset_name):
+def evaluate_assignment_results(df_results, novelty_threshold, use_normalized_probs, subset_name):
     metrics = {}
 
     for agg_k, group in df_results.groupby("aggregation_k"):
@@ -10,7 +10,7 @@ def evaluate_assignment_results(df_results, novelty_threshold, subset_name):
         y_true = group["is_actually_novel"].astype(int)
 
         # recompute prediction from threshold
-        y_pred = (group["top_prob"] < novelty_threshold).astype(int)
+        y_pred = (group["top_prob" if use_normalized_probs else "top_score"] < novelty_threshold).astype(int)
 
         tp = int(((y_true == 1) & (y_pred == 1)).sum())
         tn = int(((y_true == 0) & (y_pred == 0)).sum())

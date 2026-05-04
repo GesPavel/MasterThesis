@@ -5,7 +5,9 @@ experiment:
   random_seed: 42
 
 data:
-  dataset_pickle: "raw_data/MSL40.pkl"
+  dataset_type: "dual"       # single | dual
+  dataset_pickle: "raw_data/MSL41_complete.pkl" # main dataset to use
+  dataset_pickle_secondary: "raw_data/MSL40_complete.pkl" # required when dataset_type=dual, used for data split only
   representation: "hmm"        # hmm | pc | hybrid
   taxon_rank: "Family"         # Family | Genus | Order | ...
 
@@ -54,6 +56,7 @@ aggregation:
   topk_values: [1]         # null = use all, or e.g. [3, 5, 10]
 
 novelty:
+  use_normalized_probabilities: false
   optimization_metric: "accuracy"  # f1 | precision | recall | accuracy
 #evaluation:
 #  top_k: [1, 2, 3]

@@ -3,7 +3,8 @@ import numpy as np
 def get_novelty_threshold(
         df_assigned_taxa,
         metric,
-        num_thresholds=200
+        use_normalized_probs,
+        num_thresholds=2000
 ):
     """
     Finds optimal novelty threshold based on chosen metric.
@@ -12,9 +13,9 @@ def get_novelty_threshold(
     """
 
     y_true = df_assigned_taxa["is_actually_novel"].astype(int).values
-    probs = df_assigned_taxa["top_prob"].values
+    probs = df_assigned_taxa["top_prob" if use_normalized_probs else "top_score"].values
 
-    thresholds = np.linspace(0.0, 1.0, num_thresholds)
+    thresholds = np.linspace(0.0, 100, num_thresholds)
 
     best_t = 0.0
     best_score = -1.0
