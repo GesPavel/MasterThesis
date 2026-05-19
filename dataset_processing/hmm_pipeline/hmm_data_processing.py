@@ -7,16 +7,29 @@ def build_name_to_hmm_set_dict(df):
     return {accession: set(hits) for accession, hits in zip(accessions, hmm_hits)}
 
 
-def compute_features(pairs_df, genome_dict, feature_config, process_target_var=True):
-    g1_all = pairs_df["genome1"].to_numpy()
-    g2_all = pairs_df["genome2"].to_numpy()
+def build_name_to_feature_dict(df, representation):
+    accessions = df["Accession"].to_numpy()
 
-    genome_list_1 = g1_all.tolist()
-    genome_list_2 = g2_all.tolist()
+    if representation == "hmm":
+        hmm_hits = df["hmms_hits"].to_numpy()
+        return {accession: set(hits) for accession, hits in zip(accessions, hmm_hits)}
 
-    set1_list = [genome_dict[g] for g in g1_all]
-    set2_list = [genome_dict[g] for g in g2_all]
+    if representation == "pc":
+        pc_hits = df["pc_hits"].to_numpy()
+        return {accession: set(hits) for accession, hits in zip(accessions, pc_hits)}
 
+    if representation == "hybrid":
+        hmm_hits = df["hmms_hits"].to_numpy()
+        pc_hits = df["pc_hits"].to_numpy()
+        return {
+            accession: {"hmm": set(hmm), "pc": set(pc)}
+            for accession, hmm, pc in zip(accessions, hmm_hits, pc_hits)
+        }
+
+    raise ValueError(f"Unsupported representation: {representation}")
+
+
+def _compute_feature_block(set1_list, set2_list, feature_config):
     len1 = np.fromiter((len(s) for s in set1_list), dtype=np.int32, count=len(set1_list))
     len2 = np.fromiter((len(s) for s in set2_list), dtype=np.int32, count=len(set2_list))
 
@@ -61,12 +74,39 @@ def compute_features(pairs_df, genome_dict, feature_config, process_target_var=T
         columns.append(np.abs(len1 - len2))
 
     if columns:
-        X = np.column_stack(columns)
+        return np.column_stack(columns)
+
+    return np.empty((len(set1_list), 0))
+
+
+def compute_features(pairs_df, genome_dict, feature_config, representation="hmm", process_target_var=True):
+    g1_all = pairs_df["genome1"].to_numpy()
+    g2_all = pairs_df["genome2"].to_numpy()
+
+    genome_list_1 = g1_all.tolist()
+    genome_list_2 = g2_all.tolist()
+
+    if representation in {"hmm", "pc"}:
+        set1_list = [genome_dict[g] for g in g1_all]
+        set2_list = [genome_dict[g] for g in g2_all]
+        X = _compute_feature_block(set1_list, set2_list, feature_config)
+
+    elif representation == "hybrid":
+        set1_hmm = [genome_dict[g]["hmm"] for g in g1_all]
+        set2_hmm = [genome_dict[g]["hmm"] for g in g2_all]
+        set1_pc = [genome_dict[g]["pc"] for g in g1_all]
+        set2_pc = [genome_dict[g]["pc"] for g in g2_all]
+
+        X_hmm = _compute_feature_block(set1_hmm, set2_hmm, feature_config)
+        X_pc = _compute_feature_block(set1_pc, set2_pc, feature_config)
+        X = np.hstack([X_hmm, X_pc])
+
     else:
-        X = np.empty((len(genome_list_1), 0))
+        raise ValueError(f"Unsupported representation: {representation}")
 
     y = None
     if process_target_var:
         y = pairs_df["same_taxon"].to_numpy()
 
     return X, y, genome_list_1, genome_list_2
+

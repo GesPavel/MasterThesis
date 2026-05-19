@@ -232,6 +232,7 @@ def run_pair_generation_stage(config: dict, exp_dir: Path):
     print("=== [2/8] BUILDING GROUND TRUTH DATASET FOR PROBABILISTIC MODEL ===")
 
     taxon_rank = config["data"]["taxon_rank"]
+    representation = config["data"]["representation"]
     split_paths = get_split_paths(exp_dir, taxon_rank)
     train_df = load_pickle_given_config(config, "train")
 
@@ -249,6 +250,7 @@ def run_pair_generation_stage(config: dict, exp_dir: Path):
     train_pairs_df = build_pairs_dataset(
         df=df_true_train,
         rank=taxon_rank,
+        representation= representation,
         k_neighbors=config["pair_generation"]["k_neighbors"],
         k_random=config["pair_generation"]["k_random"],
         random_seed=config["experiment"]["random_seed"],
@@ -259,6 +261,7 @@ def run_pair_generation_stage(config: dict, exp_dir: Path):
     val_pairs_df = build_pairs_dataset(
         df=df_calibration,
         rank=taxon_rank,
+        representation= representation,
         k_neighbors=config["pair_generation"]["k_neighbors"],
         k_random=config["pair_generation"]["k_random"],
         random_seed=config["experiment"]["random_seed"],
@@ -270,6 +273,7 @@ def run_training_stage(config: dict, exp_dir: Path):
     print("=== [3/8] TRAINING MODEL ===")
 
     taxon_rank = config["data"]["taxon_rank"]
+    representation = config["data"]["representation"]
     train_df =  load_pickle_given_config(config, "train")
 
     true_train_df = filter_unpickled_dataframe(
@@ -286,6 +290,7 @@ def run_training_stage(config: dict, exp_dir: Path):
         model_type=config["model"]["type"],
         model_config=config["model"],
         feature_config=config["features"],
+        representation=representation,
         random_seed=config["experiment"]["random_seed"],
     )
 
@@ -304,6 +309,7 @@ def run_calibration_stage(config: dict, exp_dir: Path):
     print("=== [4/8] CALIBRATING MODEL ===")
 
     taxon_rank = config["data"]["taxon_rank"]
+    representation = config["data"]["representation"]
 
     train_df = load_pickle_given_config(config, "train")
 
@@ -320,7 +326,8 @@ def run_calibration_stage(config: dict, exp_dir: Path):
         df=df_cal_val,
         val_pairs_df=val_pairs,
         feature_config=config["features"],
-        calibration_config=config["calibration"]
+        calibration_config=config["calibration"],
+        representation=representation
     )
 
     calibrated_model_path = get_calibrated_model_path(exp_dir)
@@ -337,6 +344,7 @@ def run_probability_prediction_stage(config: dict, exp_dir: Path, model):
     print("=== [5/8] PROBABILITY PREDICTION ===")
 
     taxon_rank = config["data"]["taxon_rank"]
+    representation = config["data"]["representation"]
 
     train_df = load_pickle_given_config(config, "train")
     true_train_df = filter_unpickled_dataframe(
@@ -360,7 +368,8 @@ def run_probability_prediction_stage(config: dict, exp_dir: Path, model):
             df_test=subset_to_predict,
             model=model,
             taxon_rank=taxon_rank,
-            feature_config=config["features"]
+            feature_config=config["features"],
+            representation=representation
         )
 
         prob_path = get_probabilities_path(exp_dir, subset_name)

@@ -1,6 +1,7 @@
 import pandas as pd
 import time
 from dataset_processing.hmm_pipeline.hmm_data_processing import compute_features
+from dataset_processing.hmm_pipeline.hmm_data_processing import build_name_to_feature_dict
 
 
 def predict_probabilities(
@@ -8,7 +9,8 @@ def predict_probabilities(
     df_test,
     model,
     taxon_rank,
-    feature_config
+    feature_config,
+    representation
 ):
     print("    Building all test × train pairs...")
     start = time.time()
@@ -33,10 +35,7 @@ def predict_probabilities(
 
     df_all = pd.concat([df_train, df_test], ignore_index=True)
 
-    genome_dict = {
-        row["Accession"]: set(row["hmms_hits"])
-        for _, row in df_all.iterrows()
-    }
+    genome_dict = build_name_to_feature_dict(df_all, representation)
 
     print(f"    Genome lookup built for {len(genome_dict):,} genomes in {time.time() - start:.2f}s")
 
@@ -50,6 +49,7 @@ def predict_probabilities(
         pairs_df=df_pairs,
         genome_dict=genome_dict,
         feature_config=feature_config,
+        representation=representation,
         process_target_var=False
     )
 

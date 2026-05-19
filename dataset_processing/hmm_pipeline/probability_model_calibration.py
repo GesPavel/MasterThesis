@@ -4,6 +4,7 @@ from sklearn.frozen import FrozenEstimator
 from sklearn.metrics import log_loss, brier_score_loss
 
 from dataset_processing.hmm_pipeline.hmm_data_processing import compute_features
+from dataset_processing.hmm_pipeline.hmm_data_processing import build_name_to_feature_dict
 from dataset_processing.hmm_pipeline.probability_model_training import _describe_probs
 
 
@@ -12,16 +13,19 @@ def calibrate_model(
         df,
         val_pairs_df,
         feature_config,
-        calibration_config
+        calibration_config,
+        representation
 ):
     method = calibration_config.get("method", "isotonic")
 
-    genome_dict = {
-        row["Accession"]: set(row["hmms_hits"])
-        for _, row in df.iterrows()
-    }
+    genome_dict = build_name_to_feature_dict(df, representation)
 
-    X_val, y_val, _, _ = compute_features(val_pairs_df, genome_dict, feature_config)
+    X_val, y_val, _, _ = compute_features(
+        val_pairs_df,
+        genome_dict,
+        feature_config,
+        representation=representation
+    )
 
     # Calculate pre-calibration stats
     base_probs = base_model.predict_proba(X_val)[:, 1]

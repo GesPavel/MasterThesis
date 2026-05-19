@@ -21,10 +21,7 @@ def filter_unpickled_dataframe(df, csv_path):
 def load_pickle_given_config(config, type):
     if type not in ["train", "test"]:
         raise Exception("Trying to load invalid pickle type")
-    if config["data"]["representation"] == "hybrid":
-        raise NotImplementedError("Hybrid representation is not implemented for loading")
-
     path_to_data_dir = Path(config["data"]["data_root"]) / config["data"][
         "taxon_rank"].lower() / f"scenario{config["data"]["dataset_number"]}"
-    df = pd.read_pickle(path_to_data_dir / f"{type}_{config["data"]["representation"]}.pkl")
+    df = pd.read_pickle(path_to_data_dir / f"{type}.pkl")
     return df

@@ -99,8 +99,8 @@ def scenario2_split(
     # ---------------------------------------------------
     # Save pickles
     # ---------------------------------------------------
-    train_pickle = output_dir / "train_hmm.pkl"
-    test_pickle = output_dir / "test_hmm.pkl"
+    train_pickle = output_dir / "train.pkl"
+    test_pickle = output_dir / "test.pkl"
 
     train_df.to_pickle(train_pickle)
     test_df.to_pickle(test_pickle)
@@ -151,10 +151,10 @@ def scenario2_split(
 if __name__ == "__main__":
 
     scenario2_split(
-        pickle_path="raw_data/MSL41_complete.pkl",
-        fasta_path="raw_data/MSL41.fasta",
-        output_dir="processed_data/genus/scenario2",
-        taxonomy_rank="Genus",
+        pickle_path="raw_data/joined/MSL40_hmm_pc.pkl",
+        fasta_path="raw_data/Raw/MSL40.fasta",
+        output_dir="processed_data/family/scenario2_joined",
+        taxonomy_rank="Family",
         test_fraction=0.3,
         random_seed=42,
     )

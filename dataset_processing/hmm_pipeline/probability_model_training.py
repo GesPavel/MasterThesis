@@ -8,6 +8,7 @@ from sklearn.metrics import log_loss, accuracy_score, classification_report
 from xgboost import XGBClassifier
 
 from dataset_processing.hmm_pipeline.hmm_data_processing import compute_features
+from dataset_processing.hmm_pipeline.hmm_data_processing import build_name_to_feature_dict
 
 
 def _build_model(model_type, model_config, random_seed=42):
@@ -69,14 +70,17 @@ def train_probability_model(
     model_type,
     model_config,
     feature_config,
+    representation,
     random_seed=42
 ):
-    genome_dict = {
-        row["Accession"]: set(row["hmms_hits"])
-        for _, row in df.iterrows()
-    }
+    genome_dict = build_name_to_feature_dict(df, representation)
 
-    X_train, y_train, _, _ = compute_features(pairs_df, genome_dict, feature_config)
+    X_train, y_train, _, _ = compute_features(
+        pairs_df,
+        genome_dict,
+        feature_config,
+        representation=representation
+    )
 
     model = _build_model(model_type, model_config, random_seed=random_seed)
     model.fit(X_train, y_train)

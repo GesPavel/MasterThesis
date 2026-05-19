@@ -88,8 +88,8 @@ def scenario4_split(
     # ---------------------------------------------------
     # Save pickles
     # ---------------------------------------------------
-    train_pickle = output_dir / "train_hmm.pkl"
-    test_pickle = output_dir / "test_hmm.pkl"
+    train_pickle = output_dir / "train.pkl"
+    test_pickle = output_dir / "test.pkl"
 
     train_df.to_pickle(train_pickle)
     test_df.to_pickle(test_pickle)
