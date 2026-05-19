@@ -109,7 +109,7 @@ def _summarize_per_genome(df_scores, known_taxa):
             "target_score": target_score,
             "target_prob": target_prob,
 
-            "top1_correct": int(target_rank == 1) if target_rank is not None else 0,
+            "top1_correct": int(target_rank is not None and target_rank == 1),
             "top2_correct": int(target_rank is not None and target_rank <= 2),
             "top3_correct": int(target_rank is not None and target_rank <= 3),
         })

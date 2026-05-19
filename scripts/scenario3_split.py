@@ -133,8 +133,8 @@ def scenario3_split(
     # ---------------------------------------------------
     # Save pickles
     # ---------------------------------------------------
-    train_pickle = output_dir / "scenario3_train.pkl"
-    test_pickle = output_dir / "scenario3_test.pkl"
+    train_pickle = output_dir / "train_hmm.pkl"
+    test_pickle = output_dir / "test_hmm.pkl"
 
     train_df.to_pickle(train_pickle)
     test_df.to_pickle(test_pickle)
@@ -163,8 +163,8 @@ def scenario3_split(
     # ---------------------------------------------------
     # Save FASTA
     # ---------------------------------------------------
-    train_fasta = output_dir / "scenario3_train.fasta"
-    test_fasta = output_dir / "scenario3_test.fasta"
+    train_fasta = output_dir / "train.fasta"
+    test_fasta = output_dir / "test.fasta"
 
     SeqIO.write(train_records, train_fasta, "fasta")
     SeqIO.write(test_records, test_fasta, "fasta")

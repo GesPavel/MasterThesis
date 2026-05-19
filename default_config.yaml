@@ -5,18 +5,14 @@ experiment:
   random_seed: 42
 
 data:
-  dataset_type: "dual"       # single | dual
-  dataset_pickle: "raw_data/MSL41_complete.pkl" # main dataset to use
-  dataset_pickle_secondary: "raw_data/MSL40_complete.pkl" # required when dataset_type=dual, used for data split only
+  data_root: "processed_data"       # path to all datasets
+  dataset_number: 2                 # 1 | 2 | 3 | 4
   representation: "hmm"        # hmm | pc | hybrid
   taxon_rank: "Family"         # Family | Genus | Order | ...
 
 split:
-  novelty_test_fraction: 0.10
-  random_test_fraction: 0.15
-  true_train_fraction: 0.55
-  calibration_fraction: 0.10
-  novelty_fit_fraction: 0.10
+  calibration_fraction: 0.15
+  novelty_fit_fraction: 0.15
 
 pair_generation:
   k_neighbors: 10
