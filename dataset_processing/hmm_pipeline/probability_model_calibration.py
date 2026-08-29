@@ -6,6 +6,7 @@ from sklearn.metrics import log_loss, brier_score_loss
 from dataset_processing.hmm_pipeline.hmm_data_processing import compute_features
 from dataset_processing.hmm_pipeline.hmm_data_processing import build_name_to_feature_dict
 from dataset_processing.hmm_pipeline.probability_model_training import _describe_probs
+from dataset_processing.timing import timed
 
 
 def calibrate_model(
@@ -14,35 +15,48 @@ def calibrate_model(
         val_pairs_df,
         feature_config,
         calibration_config,
-        representation
+        representation,
+        partner_df=None
 ):
+    """
+    `partner_df` mirrors build_pairs_dataset: when the validation pairs were
+    built across two sets, both sides have to be in the feature lookup.
+    """
     method = calibration_config.get("method", "isotonic")
 
-    genome_dict = build_name_to_feature_dict(df, representation)
+    with timed("calibrate: genome lookup"):
+        genome_dict = build_name_to_feature_dict(df, representation)
 
-    X_val, y_val, _, _ = compute_features(
-        val_pairs_df,
-        genome_dict,
-        feature_config,
-        representation=representation
-    )
+        if partner_df is not None:
+            genome_dict.update(build_name_to_feature_dict(partner_df, representation))
+
+    with timed("calibrate: compute_features"):
+        X_val, y_val, _, _ = compute_features(
+            val_pairs_df,
+            genome_dict,
+            feature_config,
+            representation=representation
+        )
 
     # Calculate pre-calibration stats
-    base_probs = base_model.predict_proba(X_val)[:, 1]
-    pre_log_loss = log_loss(y_val, base_probs)
-    pre_brier = brier_score_loss(y_val, base_probs)
+    with timed("calibrate: base model predict_proba + stats"):
+        base_probs = base_model.predict_proba(X_val)[:, 1]
+        pre_log_loss = log_loss(y_val, base_probs)
+        pre_brier = brier_score_loss(y_val, base_probs)
 
     calibrated_model = CalibratedClassifierCV(
         estimator=FrozenEstimator(base_model),
         method=method
     )
 
-    calibrated_model.fit(X_val, y_val)
+    with timed(f"calibrate: fit ({method})"):
+        calibrated_model.fit(X_val, y_val)
 
     # Calculate post-calibration stats
-    calibrated_probs = calibrated_model.predict_proba(X_val)[:, 1]
-    post_log_loss = log_loss(y_val, calibrated_probs)
-    post_brier = brier_score_loss(y_val, calibrated_probs)
+    with timed("calibrate: calibrated predict_proba + stats"):
+        calibrated_probs = calibrated_model.predict_proba(X_val)[:, 1]
+        post_log_loss = log_loss(y_val, calibrated_probs)
+        post_brier = brier_score_loss(y_val, calibrated_probs)
 
     report_lines = []
     report_lines.append("=" * 80)

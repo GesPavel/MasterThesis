@@ -2,31 +2,35 @@ import yaml
 from pathlib import Path
 from datetime import datetime
 import json
-import shutil
 import argparse
+import gc
+
+import pandas as pd
 
 from dataset_processing.hmm_pipeline.ground_truth_extraction import build_pairs_dataset
-from dataset_processing.hmm_pipeline.novelty_fit import get_novelty_threshold
+from dataset_processing.hmm_pipeline.novelty_fit import (
+    DEFAULT_FPR_BUDGETS,
+    fit_novelty_threshold,
+)
 from dataset_processing.hmm_pipeline.probability_model_calibration import calibrate_model
 from dataset_processing.hmm_pipeline.probability_model_training import train_probability_model
 from dataset_processing.hmm_pipeline.probability_prediction import predict_probabilities
 from dataset_processing.hmm_pipeline.taxon_assignment import aggregate_and_summarize
 from dataset_processing.hmm_pipeline.taxon_assignment_evaluation import evaluate_assignment_results
 from dataset_processing.train_test_split import load_dataset_split
-from dataset_processing.util import filter_unpickled_dataframe, load_pickle_given_config
-from dataset_processing.paths import (
-    get_split_paths,
-    get_train_pairs_path,
-    get_val_pairs_path,
-    get_model_path,
-    get_calibrated_model_path,
-    get_metrics_path,
-    get_assignment_results_path,
-    get_probabilities_path,
-    get_novelty_threshold_path, get_known_taxa_path
+from dataset_processing.util import (
+    load_scenario_pickle,
+    discover_test_variants,
 )
-import pandas as pd
-import joblib
+from dataset_processing.paths import (
+    ensure_dir,
+    get_metrics_path,
+    get_novelty_pr_curve_path,
+    get_novelty_roc_curve_path,
+    get_novelty_threshold_path,
+    get_top_candidates_path,
+)
+from dataset_processing.timing import timed, log
 
 
 # =========================
@@ -42,10 +46,18 @@ def read_config(config_path: Path) -> dict:
 # Experiment folder
 # =========================
 
+def get_experiments_root(config: dict) -> Path:
+    return Path(config["experiment"].get("output_root") or "experiments")
+
+
 def create_experiment_dir(config: dict) -> Path:
+    """
+    The experiment dir now only holds the final metrics (and the config used to
+    produce them). Every intermediate artefact stays in memory.
+    """
     exp_name = config["experiment"]["name"]
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    exp_dir = Path("experiments") / f"{timestamp}_{exp_name}"
+    exp_dir = get_experiments_root(config) / f"{timestamp}_{exp_name}"
     exp_dir.mkdir(parents=True, exist_ok=True)
 
     with open(exp_dir / "config_used.yaml", "w") as f:
@@ -54,478 +66,389 @@ def create_experiment_dir(config: dict) -> Path:
     return exp_dir
 
 
-def find_parent_experiment(parent_name: str) -> Path:
-    root = Path("experiments")
-    matches = [p for p in root.iterdir() if p.is_dir() and p.name.endswith(f"_{parent_name}")]
-    if not matches:
-        raise ValueError(f"Parent experiment '{parent_name}' not found")
-    return sorted(matches)[-1]
-
-
-# =========================
-# Stage definitions
-# =========================
-
-STAGES = ["split", "pairs", "train", "calibrate", "probability_prediction", "assign", "novelty_fit", "eval"]
-
-STAGE_DEPENDENCIES = {
-    "split": [],
-    "pairs": ["split"],
-    "train": ["pairs"],
-    "calibrate": ["train"],
-    "probability_prediction": ["calibrate"],
-    "assign": ["probability_prediction"],
-    "novelty_fit": ["assign"],
-    "eval": ["assign", "novelty_fit"],
-}
-
-
-def _subset_equal(current: dict, parent: dict, keys: list) -> bool:
-    return all(current.get(k) == parent.get(k) for k in keys)
-
-
-def compare_configs_for_stage(stage, current, parent):
-    if stage == "split":
-        return _subset_equal(current, parent, ["data", "split"])
-
-    if stage == "pairs":
-        return _subset_equal(current, parent, ["data", "pair_generation"])
-
-    if stage == "train":
-        return _subset_equal(current, parent, ["data", "features", "model"])
-
-    if stage == "calibrate":
-        return _subset_equal(current, parent, ["data", "features", "model", "calibration"])
-
-    if stage == "probability_prediction":
-        return _subset_equal(current, parent, ["data", "features", "model", "calibration"])
-
-    if stage == "assign":
-        return _subset_equal(current, parent, ["data", "features", "aggregation", "calibration"])
-
-    if stage == "novelty_fit":
-        return _subset_equal(current, parent, ["data", "features", "model", "calibration", "novelty_fit"])
-
-    if stage == "eval":
-        return _subset_equal(current, parent,
-                             ["data", "features", "aggregation", "calibration"])
-
-    return True
-
-
-def validate_stage_plan(stages_to_run, parent_dir):
-    stages_to_run = set(stages_to_run)
-
-    for stage in stages_to_run:
-        for dep in STAGE_DEPENDENCIES[stage]:
-            if dep not in stages_to_run and parent_dir is None:
-                raise ValueError(
-                    f"Stage '{stage}' requires '{dep}', but '{dep}' is not rerun "
-                    f"and no parent experiment is provided."
-                )
-
-
-def copy_stage_outputs(stage, parent_dir, current_dir, config):
-    print(f"Copying outputs for stage: {stage} from parent")
-
-    rank = config["data"]["taxon_rank"]
-
-    if stage == "split":
-        parent_paths = get_split_paths(parent_dir, rank)
-        current_paths = get_split_paths(current_dir, rank)
-
-        for key in parent_paths:
-            shutil.copy(parent_paths[key], current_paths[key])
-
-        shutil.copy(
-            get_known_taxa_path(parent_dir),
-            get_known_taxa_path(current_dir)
-        )
-
-    elif stage == "pairs":
-        shutil.copy(
-            get_train_pairs_path(parent_dir, rank),
-            get_train_pairs_path(current_dir, rank)
-        )
-        shutil.copy(
-            get_val_pairs_path(parent_dir, rank),
-            get_val_pairs_path(current_dir, rank)
-        )
-
-    elif stage == "train":
-        shutil.copy(
-            get_model_path(parent_dir),
-            get_model_path(current_dir)
-        )
-
-    elif stage == "calibrate":
-        shutil.copy(
-            get_calibrated_model_path(parent_dir),
-            get_calibrated_model_path(current_dir)
-        )
-        shutil.copy(
-            parent_dir / "calibration_report.txt",
-            current_dir / "calibration_report.txt"
-        )
-
-    elif stage == "probability_prediction":
-        for subset_name in ["novelty_fit", "test"]:
-            shutil.copy(
-                get_probabilities_path(parent_dir, subset_name),
-                get_probabilities_path(current_dir, subset_name)
-            )
-
-    elif stage == "assign":
-        for subset_name in ["novelty_fit", "test"]:
-            shutil.copy(
-                get_assignment_results_path(parent_dir, subset_name),
-                get_assignment_results_path(current_dir, subset_name)
-            )
-
-    elif stage == "novelty_fit":
-        shutil.copy(
-            get_novelty_threshold_path(parent_dir),
-            get_novelty_threshold_path(current_dir)
-        )
-
-    elif stage == "eval":
-        shutil.copy(
-            get_metrics_path(parent_dir),
-            get_metrics_path(current_dir)
-        )
-
-
 # =========================
 # Stages
 # =========================
 
-def run_split_stage(config: dict, exp_dir: Path):
+def run_split_stage(config: dict, train_df):
     print("=== [1/8] SPLITTING DATASET ===")
-    taxonomy_rank = config["data"]["taxon_rank"]
 
-    train_df = load_pickle_given_config(config, "train")
-    test_df = load_pickle_given_config(config, "test")
+    taxonomy_rank = config["data"]["taxon_rank"]
     split_config = config["split"]
 
-    test, true_train, calibration, novelty_fit, known_taxa = load_dataset_split(
-            train_df=train_df,
-            test_df=test_df,
-            taxonomy_rank=taxonomy_rank,
-            calibration_fraction=split_config["calibration_fraction"],
-            novelty_fit_fraction=split_config["novelty_fit_fraction"],
-            random_seed=config["experiment"]["random_seed"],
+    # The external test sets are not needed to build the split; they are loaded
+    # later, at prediction time.
+    empty_test_df = train_df.iloc[0:0]
+
+    _, true_train, calibration, novelty_fit, known_taxa = load_dataset_split(
+        train_df=train_df,
+        test_df=empty_test_df,
+        taxonomy_rank=taxonomy_rank,
+        calibration_fraction=split_config["calibration_fraction"],
+        novelty_fit_fraction=split_config["novelty_fit_fraction"],
+        random_seed=config["experiment"]["random_seed"],
     )
 
-
-    paths = get_split_paths(exp_dir, taxonomy_rank)
-
-    test.to_csv(paths["test"], index=False)
-    true_train.to_csv(paths["true_train"], index=False)
-    calibration.to_csv(paths["calibration"], index=False)
-    novelty_fit.to_csv(paths["novelty_fit"], index=False)
-
-    known_taxa_path = get_known_taxa_path(exp_dir)
-    known_taxa.to_csv(known_taxa_path, index=False)
+    return true_train, calibration, novelty_fit, known_taxa
 
 
-def run_pair_generation_stage(config: dict, exp_dir: Path):
+def run_pair_generation_stage(config: dict, true_train_df, calibration_df):
     print("=== [2/8] BUILDING GROUND TRUTH DATASET FOR PROBABILISTIC MODEL ===")
 
     taxon_rank = config["data"]["taxon_rank"]
     representation = config["data"]["representation"]
-    split_paths = get_split_paths(exp_dir, taxon_rank)
-    train_df = load_pickle_given_config(config, "train")
-
-    df_true_train = filter_unpickled_dataframe(
-        train_df,
-        split_paths["true_train"]
-    )
-
-    df_calibration = filter_unpickled_dataframe(
-        train_df,
-        split_paths["calibration"]
-    )
 
     print("--- Generating pairs for true_train ---")
-    train_pairs_df = build_pairs_dataset(
-        df=df_true_train,
-        rank=taxon_rank,
-        representation= representation,
-        k_neighbors=config["pair_generation"]["k_neighbors"],
-        k_random=config["pair_generation"]["k_random"],
-        random_seed=config["experiment"]["random_seed"],
-    )
-    train_pairs_df.to_csv(get_train_pairs_path(exp_dir, taxon_rank), index=False)
+    with timed("pairs: true_train"):
+        train_pairs_df = build_pairs_dataset(
+            df=true_train_df,
+            rank=taxon_rank,
+            representation=representation,
+            k_pos=config["pair_generation"]["k_pos"],
+            random_seed=config["experiment"]["random_seed"],
+        )
 
-    print("--- Generating pairs for calibration ---")
-    val_pairs_df = build_pairs_dataset(
-        df=df_calibration,
-        rank=taxon_rank,
-        representation= representation,
-        k_neighbors=config["pair_generation"]["k_neighbors"],
-        k_random=config["pair_generation"]["k_random"],
-        random_seed=config["experiment"]["random_seed"],
-    )
-    val_pairs_df.to_csv(get_val_pairs_path(exp_dir, taxon_rank), index=False)
+    # Calibration genomes are paired against the training set, not against each
+    # other: that is the setting the model actually faces at prediction time.
+    print("--- Generating pairs for calibration (against true_train) ---")
+    with timed("pairs: calibration"):
+        val_pairs_df = build_pairs_dataset(
+            df=calibration_df,
+            rank=taxon_rank,
+            representation=representation,
+            partner_df=true_train_df,
+            k_pos=config["pair_generation"]["k_pos"],
+            random_seed=config["experiment"]["random_seed"],
+        )
+
+    return train_pairs_df, val_pairs_df
 
 
-def run_training_stage(config: dict, exp_dir: Path):
+def run_training_stage(config: dict, true_train_df, train_pairs_df):
     print("=== [3/8] TRAINING MODEL ===")
-
-    taxon_rank = config["data"]["taxon_rank"]
-    representation = config["data"]["representation"]
-    train_df =  load_pickle_given_config(config, "train")
-
-    true_train_df = filter_unpickled_dataframe(
-        train_df,
-        get_split_paths(exp_dir, taxon_rank)["true_train"]
-    )
-
-    pairs_df = pd.read_csv(get_train_pairs_path(exp_dir, taxon_rank))
 
     report_str, model = train_probability_model(
         df=true_train_df,
-        pairs_df=pairs_df,
-        taxon_rank=taxon_rank,
+        pairs_df=train_pairs_df,
+        taxon_rank=config["data"]["taxon_rank"],
         model_type=config["model"]["type"],
         model_config=config["model"],
         feature_config=config["features"],
-        representation=representation,
+        representation=config["data"]["representation"],
         random_seed=config["experiment"]["random_seed"],
     )
 
-    model_path = get_model_path(exp_dir)
-    report_path = exp_dir / "pairwise_training_report.txt"
-
-    joblib.dump(model, model_path)
-
-    with open(report_path, "w", encoding="utf-8") as f:
-        f.write(report_str)
+    print(report_str)
 
     return model
 
 
-def run_calibration_stage(config: dict, exp_dir: Path):
+def run_calibration_stage(config: dict, calibration_df, true_train_df, val_pairs_df, model):
     print("=== [4/8] CALIBRATING MODEL ===")
-
-    taxon_rank = config["data"]["taxon_rank"]
-    representation = config["data"]["representation"]
-
-    train_df = load_pickle_given_config(config, "train")
-
-    df_cal_val = filter_unpickled_dataframe(
-        train_df,
-        get_split_paths(exp_dir, taxon_rank)["calibration"]
-    )
-
-    model = joblib.load(get_model_path(exp_dir))
-    val_pairs = pd.read_csv(get_val_pairs_path(exp_dir, taxon_rank))
 
     calibration_report, calibrated_model = calibrate_model(
         base_model=model,
-        df=df_cal_val,
-        val_pairs_df=val_pairs,
+        df=calibration_df,
+        val_pairs_df=val_pairs_df,
         feature_config=config["features"],
         calibration_config=config["calibration"],
-        representation=representation
+        representation=config["data"]["representation"],
+        # The validation pairs span both sets, so both have to be resolvable.
+        partner_df=true_train_df,
     )
 
-    calibrated_model_path = get_calibrated_model_path(exp_dir)
-    joblib.dump(calibrated_model, calibrated_model_path)
-
-    report_path = exp_dir / "calibration_report.txt"
-    with open(report_path, "w", encoding="utf-8") as f:
-        f.write(calibration_report)
+    print(calibration_report)
 
     return calibrated_model
 
 
-def run_probability_prediction_stage(config: dict, exp_dir: Path, model):
-    print("=== [5/8] PROBABILITY PREDICTION ===")
+# Upper bound on the number of (test, train) pairs materialised at once. The
+# pairwise feature matrix is the memory driver: at 10 float64 columns, 40M pairs
+# is ~3.2 GB for X alone, and several times that once the pair frame, the python
+# genome lists and the probability frame are counted. Aggregation then sorts the
+# probability frame, which peaks at roughly 3x its size -- measured at 6.5 GB for
+# a 20M chunk. Smaller chunks cost no extra total time, only more of them.
+MAX_PAIRS_PER_CHUNK = 20_000_000
 
-    taxon_rank = config["data"]["taxon_rank"]
-    representation = config["data"]["representation"]
+# The main test set (absent in scenario 1, which only has dark-matter variants).
+MAIN_TEST_VARIANT = "test"
 
-    train_df = load_pickle_given_config(config, "train")
-    true_train_df = filter_unpickled_dataframe(
-        train_df,
-        get_split_paths(exp_dir, taxon_rank)["true_train"]
+# How many candidate taxa per genome are kept for post-hoc analysis, main test
+# set only.
+N_TOP_CANDIDATES = 5
+
+
+def _predict_and_assign_subset(
+    config, model, true_train_df, subset_df, known_taxa, subset_name, n_top_candidates
+):
+    """
+    Predict + aggregate one subset, in chunks of test genomes.
+
+    Chunking is over test genomes only, so every (test genome, train genome)
+    pair for a given test genome stays inside a single chunk. Aggregation groups
+    by test genome, so the concatenated per-chunk results are identical to what a
+    single-shot run would produce -- it only bounds peak memory.
+    """
+    n_train = len(true_train_df)
+    chunk_size = max(1, MAX_PAIRS_PER_CHUNK // max(1, n_train))
+    n_chunks = (len(subset_df) + chunk_size - 1) // chunk_size
+
+    log(
+        f"{subset_name}: {len(subset_df):,} test x {n_train:,} train genomes "
+        f"= {len(subset_df) * n_train:,} pairs, {n_chunks} chunk(s) of <= {chunk_size:,} test genomes"
     )
 
-    novelty_fit_df = filter_unpickled_dataframe(
-        train_df,
-        get_split_paths(exp_dir, taxon_rank)["novelty_fit"]
-    )
+    chunk_results = []
 
-    test_df = load_pickle_given_config(config, "test")
+    for chunk_index in range(n_chunks):
+        chunk_df = subset_df.iloc[chunk_index * chunk_size:(chunk_index + 1) * chunk_size]
 
-    for subset_name, subset_to_predict in [("novelty_fit", novelty_fit_df),
-                                           ("test", test_df),]:
-        print(f"--- Predicting probabilities for subset: {subset_name} ---")
-
-        df_probabilities = predict_probabilities(
-            df_train=true_train_df,
-            df_test=subset_to_predict,
-            model=model,
-            taxon_rank=taxon_rank,
-            feature_config=config["features"],
-            representation=representation
+        print(
+            f"--- {subset_name}: chunk {chunk_index + 1}/{n_chunks} "
+            f"({len(chunk_df):,} test genomes) ---"
         )
 
-        prob_path = get_probabilities_path(exp_dir, subset_name)
-        df_probabilities.to_pickle(prob_path)
+        with timed(f"predict: {subset_name} chunk {chunk_index + 1}/{n_chunks}"):
+            df_probabilities = predict_probabilities(
+                df_train=true_train_df,
+                df_test=chunk_df,
+                model=model,
+                taxon_rank=config["data"]["taxon_rank"],
+                feature_config=config["features"],
+                representation=config["data"]["representation"],
+            )
+
+        with timed(f"assign: {subset_name} chunk {chunk_index + 1}/{n_chunks}"):
+            chunk_results.append(
+                aggregate_and_summarize(
+                    df_probabilities=df_probabilities,
+                    aggregation_config=config["aggregation"],
+                    known_taxa=known_taxa,
+                    n_top_candidates=n_top_candidates,
+                )
+            )
+
+        with timed(f"free probability table: {subset_name} chunk {chunk_index + 1}/{n_chunks}"):
+            del df_probabilities, chunk_df
+            gc.collect()
+
+    if len(chunk_results) == 1:
+        return chunk_results[0]
+
+    with timed(f"concat chunk results: {subset_name}"):
+        return pd.concat(chunk_results, ignore_index=True)
 
 
-def run_assignment_stage(config: dict, exp_dir: Path):
-    print("=== [6/8] TAXON ASSIGNMENT ===")
+def run_prediction_and_assignment_stages(
+    config: dict, scenario, model, true_train_df, novelty_fit_df, known_taxa
+):
+    """
+    Stages 5 and 6, fused.
 
-    for subset_name in ["novelty_fit", "test"]:
-        print(f"--- Running assignment for subset: {subset_name} ---")
+    The pairwise probability table is (n_test x n_train) rows -- hundreds of
+    millions for the bigger dark-matter variants -- so it is never kept beyond
+    the chunk it belongs to. Only the (small) per-genome assignment results
+    survive the loop.
+    """
+    print("=== [5/8] PROBABILITY PREDICTION + [6/8] TAXON ASSIGNMENT ===")
 
-        prob_path = get_probabilities_path(exp_dir, subset_name)
-        df_probabilities = pd.read_pickle(prob_path)
+    # The novelty-fit subset (used to fit the threshold) plus every available
+    # test set: the main test and each dark-matter variant.
+    subset_names = ["novelty_fit"] + discover_test_variants(config, scenario)
 
-        known_taxa_path = get_known_taxa_path(exp_dir)
-        known_taxa = pd.read_csv(known_taxa_path)
+    assignments = {}
 
-        df_results = aggregate_and_summarize(
-            df_probabilities=df_probabilities,
-            aggregation_config=config["aggregation"],
-            known_taxa=known_taxa,
-        )
+    for subset_name in subset_names:
+        if subset_name == "novelty_fit":
+            subset_df = novelty_fit_df
+        else:
+            with timed(f"load test pickle: {subset_name}"):
+                subset_df = load_scenario_pickle(config, scenario, subset_name)
 
-        results_path = get_assignment_results_path(exp_dir, subset_name)
-        df_results.to_csv(results_path, index=False)
+        with timed(f"subset total: {subset_name}"):
+            assignments[subset_name] = _predict_and_assign_subset(
+                config, model, true_train_df, subset_df, known_taxa, subset_name,
+                # Only the main test set carries the candidate ranking.
+                n_top_candidates=N_TOP_CANDIDATES if subset_name == MAIN_TEST_VARIANT else 0,
+            )
+
+        if subset_name != "novelty_fit":
+            del subset_df
+            gc.collect()
+
+    return assignments
 
 
-def run_novelty_fit_stage(config: dict, exp_dir: Path):
+def save_top_candidates(work_dir: Path, assignments: dict):
+    """
+    Per-genome ranking of the N best candidate taxa with their raw aggregated
+    scores, for the main test set only (scenario 1 has none). Purely an analysis
+    artefact -- nothing in the pipeline reads it back.
+    """
+    if MAIN_TEST_VARIANT not in assignments:
+        print("    No main test set in this scenario, skipping top candidates.")
+        return
+
+    columns = ["genome_test", "true_taxon", "aggregation_method", "aggregation_k"]
+    for i in range(1, N_TOP_CANDIDATES + 1):
+        columns += [f"top{i}_taxon", f"top{i}_score"]
+
+    path = get_top_candidates_path(work_dir, MAIN_TEST_VARIANT)
+    assignments[MAIN_TEST_VARIANT][columns].to_csv(path, index=False)
+
+    print(f"    Top-{N_TOP_CANDIDATES} candidate taxa written to {path}")
+
+
+def run_novelty_fit_stage(config: dict, work_dir: Path, novelty_fit_results):
     print("=== [7/8] NOVELTY FIT ===")
 
-    results_path = get_assignment_results_path(exp_dir, "novelty_fit")
-    df_results = pd.read_csv(results_path)
+    use_normalized_probs = config["novelty"]["use_normalized_probabilities"]
+    fpr_budgets = config["novelty"].get("max_fpr_budgets") or DEFAULT_FPR_BUDGETS
 
-    optimization_metric = config["novelty"]['optimization_metric']
-    use_normalized_probs = config["novelty"]['use_normalized_probabilities']
-    threshold, _ = get_novelty_threshold(df_results, metric=optimization_metric,
-                                         use_normalized_probs=use_normalized_probs)
+    with timed("novelty threshold search"):
+        result = fit_novelty_threshold(
+            novelty_fit_results,
+            use_normalized_probs=use_normalized_probs,
+            fpr_budgets=fpr_budgets,
+        )
 
-    threshold_path = get_novelty_threshold_path(exp_dir)
+    roc_path = get_novelty_roc_curve_path(work_dir)
+    pr_path = get_novelty_pr_curve_path(work_dir)
+    result.save_figures(roc_path, pr_path)
+
+    threshold_path = get_novelty_threshold_path(work_dir)
     with open(threshold_path, "w") as f:
-        json.dump(threshold, f, indent=2)
+        json.dump(result.summary(), f, indent=2)
 
-    print(f"    Novelty fit complete. Optimal threshold: {threshold}")
+    print(
+        f"    Novelty fit complete. Threshold: {result.threshold:.6g} "
+        f"(TPR {result.tpr[result.chosen_index]:.3f} at FPR "
+        f"{result.fpr[result.chosen_index]:.3f}, budget "
+        f"{result.fpr_budget:.0%})"
+    )
+    print(f"    AUROC: {result.auroc:.4f}    AUPRC: {result.auprc:.4f}")
+    print(f"    Threshold summary written to {threshold_path}")
+    print(f"    Curves written to {roc_path} and {pr_path}")
+
+    return result.threshold
 
 
-def run_evaluation_stage(config: dict, exp_dir: Path):
+def run_evaluation_stage(config: dict, scenario, work_dir: Path, assignments: dict, threshold):
     print("=== [8/8] EVALUATION ===")
 
-    threshold_path = get_novelty_threshold_path(exp_dir)
-    with open(threshold_path, "r") as f:
-        threshold = json.load(f)
+    use_normalized_probs = config["novelty"]["use_normalized_probabilities"]
 
-    use_normalized_probs = config["novelty"]['use_normalized_probabilities']
+    # Produce a separate report for the main test and each dark-matter variant,
+    # all evaluated against the shared novelty threshold.
+    for variant in discover_test_variants(config, scenario):
+        print(f"--- Evaluating test variant: {variant} ---")
 
+        with timed(f"eval: {variant}"):
+            metrics = evaluate_assignment_results(
+                assignments[variant], threshold, use_normalized_probs
+            )
 
-    results_path = get_assignment_results_path(exp_dir, "test")
-    df_results = pd.read_csv(results_path)
+        metrics_path = get_metrics_path(work_dir, variant)
+        with open(metrics_path, "w") as f:
+            json.dump(
+                {"novelty_threshold": threshold, "assignment": metrics},
+                f,
+                indent=2,
+            )
 
-    metrics = evaluate_assignment_results(df_results, threshold, use_normalized_probs)
-
-    with open(get_metrics_path(exp_dir), "w") as f:
-        json.dump({"assignment": metrics}, f, indent=2)
+        print(f"    Metrics written to {metrics_path}")
 
 
 # =========================
 # Main
 # =========================
 
-def run_experiment(config_path: Path, stages_to_run: list):
+def resolve_scenarios(config: dict) -> list:
+    """Turn data.chosen_scenario (1|2|3|4|all) into the list of scenarios to run."""
+    chosen = config["data"]["chosen_scenario"]
+    if str(chosen).lower() == "all":
+        return [1, 2, 3, 4]
+    return [int(chosen)]
+
+
+def run_scenario_pipeline(config: dict, scenario, work_dir: Path):
+    """
+    Run the full pipeline for a single scenario. Everything except the final
+    metrics is kept in memory and handed from stage to stage.
+    """
+    with timed(f"load train pickle (scenario {scenario})"):
+        train_df = load_scenario_pickle(config, scenario, "train")
+    log(f"train pickle: {len(train_df):,} genomes")
+
+    with timed("stage: split"):
+        true_train_df, calibration_df, novelty_fit_df, known_taxa = run_split_stage(
+            config, train_df
+        )
+
+    # The full train pickle is no longer needed; drop the reference so the
+    # subsets are the only thing held.
+    del train_df
+    gc.collect()
+
+    with timed("stage: pairs"):
+        train_pairs_df, val_pairs_df = run_pair_generation_stage(
+            config, true_train_df, calibration_df
+        )
+
+    with timed("stage: train"):
+        model = run_training_stage(config, true_train_df, train_pairs_df)
+
+    with timed("stage: calibrate"):
+        model = run_calibration_stage(
+            config, calibration_df, true_train_df, val_pairs_df, model
+        )
+
+    # Pair tables and the calibration subset are only inputs to train/calibrate.
+    del train_pairs_df, val_pairs_df, calibration_df
+    gc.collect()
+
+    with timed("stage: probability_prediction + assign"):
+        assignments = run_prediction_and_assignment_stages(
+            config, scenario, model, true_train_df, novelty_fit_df, known_taxa
+        )
+
+    with timed("stage: top candidates"):
+        save_top_candidates(work_dir, assignments)
+
+    with timed("stage: novelty_fit"):
+        threshold = run_novelty_fit_stage(config, work_dir, assignments["novelty_fit"])
+
+    with timed("stage: eval"):
+        run_evaluation_stage(config, scenario, work_dir, assignments, threshold)
+
+
+def run_experiment(config_path: Path):
     config = read_config(config_path)
     exp_dir = create_experiment_dir(config)
 
-    parent_name = config["experiment"].get("parent_experiment_name")
+    scenarios = resolve_scenarios(config)
+    multi_scenario = len(scenarios) > 1
 
-    if parent_name is None:
-        print("No parent experiment, rerunning all stages")
-        stages_to_run = STAGES
-        parent_dir = None
-    else:
-        parent_dir = find_parent_experiment(parent_name)
-        parent_config = read_config(parent_dir / "config_used.yaml")
+    with timed("whole experiment"):
+        for scenario in scenarios:
+            print(f"\n########## SCENARIO {scenario} ##########")
 
-        # pre-check config compatibility for skipped stages
-        for stage in STAGES:
-            if stage not in stages_to_run:
-                if not compare_configs_for_stage(stage, config, parent_config):
-                    raise ValueError(
-                        f"Config mismatch for skipped stage '{stage}' with parent experiment."
-                    )
+            # Flat layout for a single scenario; per-scenario subdirs when running all.
+            if multi_scenario:
+                work_dir = ensure_dir(exp_dir / f"scenario{scenario}")
+            else:
+                work_dir = exp_dir
 
-    # pre-check dependency validity
-    validate_stage_plan(stages_to_run, parent_dir)
+            with timed(f"scenario {scenario}"):
+                run_scenario_pipeline(config, scenario, work_dir)
 
-    model = None
-
-    for stage in STAGES:
-        if stage in stages_to_run:
-            print(f"Running stage: {stage}")
-
-            if stage == "split":
-                run_split_stage(config, exp_dir)
-
-            elif stage == "pairs":
-                run_pair_generation_stage(config, exp_dir)
-
-            elif stage == "train":
-                model = run_training_stage(config, exp_dir)
-
-            elif stage == "calibrate":
-                model = run_calibration_stage(config, exp_dir)
-
-            elif stage == "probability_prediction":
-                if model is None:
-                    model_path = get_calibrated_model_path(exp_dir)
-                    if not model_path.exists():
-                        raise FileNotFoundError(
-                            f"Model file not found at {model_path}. "
-                            f"Run train and calibrate stages or provide a valid parent experiment."
-                        )
-                    model = joblib.load(model_path)
-
-                run_probability_prediction_stage(config, exp_dir, model)
-
-            elif stage == "assign":
-                run_assignment_stage(config, exp_dir)
-
-            elif stage == "novelty_fit":
-                run_novelty_fit_stage(config, exp_dir)
-
-            elif stage == "eval":
-                run_evaluation_stage(config, exp_dir)
-
-        else:
-            if parent_dir is not None:
-                copy_stage_outputs(stage, parent_dir, exp_dir, config)
-
-    print("Experiment finished successfully.")
+    print(f"Experiment finished successfully. Metrics in: {exp_dir}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True)
-    parser.add_argument(
-        "--stages",
-        type=str,
-        required=True,
-        help="Comma separated stages: split,pairs,train,calibrate,probability_prediction,assign,novelty_fit,eval"
-    )
 
     args = parser.parse_args()
 
-    stages_to_run = [s.strip() for s in args.stages.split(",")]
-
-    invalid_stages = [s for s in stages_to_run if s not in STAGES]
-    if invalid_stages:
-        raise ValueError(f"Invalid stages requested: {invalid_stages}. Valid stages: {STAGES}")
-
-    run_experiment(Path(args.config), stages_to_run)
+    run_experiment(Path(args.config))

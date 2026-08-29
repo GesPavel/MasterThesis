@@ -5,58 +5,55 @@ from tqdm import tqdm
 from scipy.special import softmax
 
 
+GROUP_KEYS = ["genome_test", "true_taxon", "taxon_train"]
+
+# Each method is just a pandas groupby reduction; logit_sum only needs the
+# probabilities turned into logits first.
+_AGGREGATIONS = {
+    "mean": "mean",
+    "median": "median",
+    "max": "max",
+    "topk_mean": "mean",
+    "logit_sum": "sum",
+}
+
+
 def _aggregate_scores(df_probabilities, method="mean", topk=None):
     print("    Aggregating taxon scores...")
     start = time.time()
 
-    grouped = []
+    if method not in _AGGREGATIONS:
+        raise ValueError(f"Unsupported aggregation method: {method}")
 
-    grouped_iter = df_probabilities.groupby(
-        ["genome_test", "true_taxon", "taxon_train"]
+    # Only these columns matter here, and dropping the rest keeps the sort below
+    # from dragging tens of millions of unused genome names around.
+    df = df_probabilities[GROUP_KEYS + ["probability"]]
+
+    if method == "logit_sum":
+        eps = 1e-6
+        probs = df["probability"].clip(eps, 1 - eps)
+        df = df.assign(probability=np.log(probs / (1 - probs)))
+
+    if topk is not None:
+        # Sorting once and taking the head of each group is the vectorised way
+        # to keep the topk best probabilities per group.
+        df = df.sort_values("probability", ascending=False).groupby(
+            GROUP_KEYS, sort=False
+        ).head(topk)
+
+    df_scores = (
+        df.groupby(GROUP_KEYS, sort=False)["probability"]
+        .agg(_AGGREGATIONS[method])
+        .reset_index()
+        .rename(columns={"taxon_train": "candidate_taxon", "probability": "score"})
     )
-
-    for (genome_test, true_taxon, taxon_train), group in tqdm(
-        grouped_iter,
-        desc="    Aggregating groups"
-    ):
-        probs = group["probability"].sort_values(ascending=False).to_numpy()
-
-        if topk is not None:
-            probs = probs[:topk]
-
-        if len(probs) == 0:
-            continue
-
-        if method == "mean":
-            score = np.mean(probs)
-        elif method == "median":
-            score = np.median(probs)
-        elif method == "max":
-            score = np.max(probs)
-        elif method == "logit_sum":
-            eps = 1e-6
-            probs = np.clip(probs, eps, 1 - eps)
-            score = np.sum(np.log(probs / (1 - probs)))
-        elif method == "topk_mean":
-            score = np.mean(probs)
-        else:
-            raise ValueError(f"Unsupported aggregation method: {method}")
-
-        grouped.append({
-            "genome_test": genome_test,
-            "true_taxon": true_taxon,
-            "candidate_taxon": taxon_train,
-            "score": score
-        })
-
-    df_scores = pd.DataFrame(grouped)
 
     print(f"    Aggregation done in {time.time() - start:.2f}s")
     print(f"    Aggregated score rows: {len(df_scores):,}")
 
     return df_scores
 
-def _summarize_per_genome(df_scores, known_taxa):
+def _summarize_per_genome(df_scores, known_taxa, n_top_candidates=0):
     print("    Summarizing per genome...")
     start = time.time()
 
@@ -114,6 +111,12 @@ def _summarize_per_genome(df_scores, known_taxa):
             "top3_correct": int(target_rank is not None and target_rank <= 3),
         })
 
+        # Runner-up taxa and their raw aggregated scores, kept only when asked
+        # for: they are an analysis artefact, not an input to any later stage.
+        for i in range(n_top_candidates):
+            row[f"top{i + 1}_taxon"] = candidate_taxa[i] if i < len(candidate_taxa) else None
+            row[f"top{i + 1}_score"] = candidate_scores[i] if i < len(candidate_scores) else None
+
         rows.append(row)
 
     df_summary = pd.DataFrame(rows)
@@ -126,8 +129,14 @@ def _summarize_per_genome(df_scores, known_taxa):
 def aggregate_and_summarize(
     df_probabilities,
     aggregation_config,
-    known_taxa
+    known_taxa,
+    n_top_candidates=0
 ):
+    """
+    `n_top_candidates` > 0 adds topN_taxon / topN_score columns to the result --
+    the per-genome ranking kept for later analysis. Left at 0 the summary is
+    exactly what the evaluation stages need, and nothing extra is carried around.
+    """
     total_start = time.time()
 
     agg_method = aggregation_config["method"]
@@ -147,7 +156,8 @@ def aggregate_and_summarize(
 
         df_summary = _summarize_per_genome(
             df_scores,
-            known_taxa = known_taxa
+            known_taxa = known_taxa,
+            n_top_candidates = n_top_candidates
         )
 
         df_summary["aggregation_method"] = agg_method
@@ -158,6 +168,6 @@ def aggregate_and_summarize(
     df_final = pd.concat(all_results, ignore_index=True)
 
     print(f"\n    Assignment/aggregation finished in {time.time() - total_start:.2f}s")
-    print(f"    Final result rows: {len(df_final):,}")
+    print(f"    Final result   rows: {len(df_final):,}")
 
     return df_final

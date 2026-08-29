@@ -18,10 +18,42 @@ def filter_unpickled_dataframe(df, csv_path):
     return df
 
 
-def load_pickle_given_config(config, type):
-    if type not in ["train", "test"]:
-        raise Exception("Trying to load invalid pickle type")
-    path_to_data_dir = Path(config["data"]["data_root"]) / config["data"][
-        "taxon_rank"].lower() / f"scenario{config["data"]["dataset_number"]}"
-    df = pd.read_pickle(path_to_data_dir / f"{type}.pkl")
-    return df
+def get_scenario_data_dir(config, scenario):
+    """
+    Resolve the directory holding the extended (PC-augmented) pickles for a
+    given scenario and the configured taxon rank.
+
+    Layout: <data_root>/<Rank>/scenario<N>/pkl_ext/
+    The rank is capitalized to match the on-disk directories (Family/Genus/Order),
+    and we always read the extended pickles (they carry both hmms_hits and pc_hits,
+    so they serve the hmm/pc/hybrid representations).
+    """
+    return (
+        Path(config["data"]["data_root"])
+        / config["data"]["taxon_rank"].capitalize()
+        / f"scenario{scenario}"
+        / "pkl_ext"
+    )
+
+
+def load_scenario_pickle(config, scenario, stem):
+    """Load a single pickle (e.g. 'train', 'test', 'test_highm') for a scenario."""
+    data_dir = get_scenario_data_dir(config, scenario)
+    return pd.read_pickle(data_dir / f"{stem}.pkl")
+
+
+def discover_test_variants(config, scenario):
+    """
+    Return the ordered list of available test pickle stems for a scenario:
+    the main 'test' first (if present -- scenario 1 has none), followed by the
+    dark-matter variants (test_*.pkl) sorted by name.
+    """
+    data_dir = get_scenario_data_dir(config, scenario)
+
+    variants = []
+    if (data_dir / "test.pkl").exists():
+        variants.append("test")
+
+    variants.extend(sorted(p.stem for p in data_dir.glob("test_*.pkl")))
+
+    return variants

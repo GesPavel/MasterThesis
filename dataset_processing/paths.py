@@ -42,8 +42,8 @@ def get_calibrated_model_path(exp_dir: Path) -> Path:
     return exp_dir / "calibrated_model.joblib"
 
 
-def get_metrics_path(exp_dir: Path) -> Path:
-    return exp_dir / "metrics.json"
+def get_metrics_path(exp_dir: Path, variant: str) -> Path:
+    return exp_dir / f"metrics_{variant}.json"
 
 
 def get_config_path(exp_dir: Path) -> Path:
@@ -58,3 +58,12 @@ def get_probabilities_path(exp_dir: Path, subset_name: str) -> Path:
 
 def get_novelty_threshold_path(exp_dir: Path) -> Path:
     return exp_dir / "novelty_threshold.json"
+
+def get_top_candidates_path(exp_dir: Path, variant: str) -> Path:
+    return exp_dir / f"top_candidates_{variant}.csv"
+
+def get_novelty_roc_curve_path(exp_dir: Path) -> Path:
+    return exp_dir / "novelty_roc_curve.png"
+
+def get_novelty_pr_curve_path(exp_dir: Path) -> Path:
+    return exp_dir / "novelty_pr_curve.png"
