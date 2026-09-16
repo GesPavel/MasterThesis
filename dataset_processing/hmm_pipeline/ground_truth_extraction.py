@@ -1,10 +1,17 @@
 import gc
 import random
 
+import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
+from dataset_processing.hmm_pipeline.hmm_data_processing import _build_hit_matrix
 from dataset_processing.timing import timed, log
+
+
+# Query genomes per similarity block. The block holds one dense
+# (block x candidate) score matrix, so this bounds it to a few tens of MB.
+SIMILARITY_BLOCK = 512
 
 
 def _add_feature_sets(df):
@@ -19,21 +26,33 @@ def _add_feature_sets(df):
     return df
 
 
-def _fast_similarity(features_i, features_j, representation):
-    if representation == "hmm":
-        return len(features_i & features_j)
+def _similarity_matrices(genome_dict, representation):
+    """Hit matrices whose row products are the similarity scores.
 
-    elif representation == "pc":
-        return len(features_i & features_j)
+    Similarity is a shared-hit count, so a sparse row product gives the whole
+    all-vs-all grid at once instead of one set intersection per genome pair.
+    Hybrid sums the two blocks, which is what the per-pair version did too.
+    """
+    if representation in {"hmm", "pc"}:
+        matrix, row_of_genome = _build_hit_matrix(genome_dict)
+        return [matrix], row_of_genome
 
-    elif representation == "hybrid":
-        hmm_sim = len(features_i["hmm"] & features_j["hmm"])
-        pc_sim = len(features_i["pc"] & features_j["pc"])
+    if representation == "hybrid":
+        hmm_matrix, row_of_genome = _build_hit_matrix(genome_dict, key="hmm")
+        pc_matrix, _ = _build_hit_matrix(genome_dict, key="pc")
+        return [hmm_matrix, pc_matrix], row_of_genome
 
-        return hmm_sim + pc_sim
+    raise ValueError(f"Unsupported representation: {representation}")
 
-    else:
-        raise ValueError(f"Unsupported representation: {representation}")
+
+def _similarity_block(matrices, candidate_matrices, query_rows):
+    """Dense (len(query_rows) x n_candidates) similarity scores."""
+    block = None
+    for matrix, candidate_matrix in zip(matrices, candidate_matrices):
+        scores = (matrix[query_rows] @ candidate_matrix).toarray()
+        block = scores if block is None else block + scores
+
+    return block
 
 
 def _build_genome_lookup(df, representation):
@@ -64,8 +83,9 @@ def _generate_pairs_for_genome(
     genome_i,
     same_taxon_candidates,
     candidate_genomes,
-    genome_dict,
-    representation,
+    candidate_taxa,
+    taxon_i,
+    similarities,
     k_pos
 ):
     """
@@ -78,6 +98,9 @@ def _generate_pairs_for_genome(
     The label is known from the bucket a partner was drawn from, so no taxon
     lookup is needed downstream. A genome with no same-taxon partner returns
     nothing: it would otherwise contribute negatives only.
+
+    `similarities` holds this genome's score against every candidate, computed
+    in bulk by the caller.
     """
     positive_pool = [g for g in same_taxon_candidates if g != genome_i]
     k_pos = min(k_pos, len(positive_pool))
@@ -88,21 +111,20 @@ def _generate_pairs_for_genome(
     n_hard = -(-k_pos // 2)  # ceil
     n_random = k_pos // 2
 
-    features_i = genome_dict[genome_i]
-    same_taxon = set(same_taxon_candidates)
+    # A candidate is a valid negative exactly when its taxon differs, which also
+    # drops genome_i itself. A stable descending sort keeps candidate order
+    # among equal scores, as the sorted list of pairs did.
+    negatives = np.flatnonzero(candidate_taxa != taxon_i)
+    ranked = negatives[np.argsort(-similarities[negatives], kind="stable")]
 
-    # genome_i itself is in same_taxon, so this also drops the self-pair.
-    sims = [
-        (genome_j, _fast_similarity(features_i, genome_dict[genome_j], representation))
-        for genome_j in candidate_genomes
-        if genome_j not in same_taxon
-    ]
-    sims.sort(key=lambda x: x[1], reverse=True)
+    hard_negatives = [candidate_genomes[j] for j in ranked[:n_hard]]
 
-    hard_negatives = [g for g, _ in sims[:n_hard]]
-
-    remaining = [g for g, _ in sims[n_hard:]]
-    random_negatives = random.sample(remaining, min(n_random, len(remaining)))
+    # Sampling positions out of range(n) draws the same values from the random
+    # module as sampling the genomes themselves would, without building the
+    # list of every remaining candidate for every query genome.
+    n_remaining = len(ranked) - n_hard
+    sampled = random.sample(range(n_remaining), min(n_random, n_remaining))
+    random_negatives = [candidate_genomes[ranked[n_hard + j]] for j in sampled]
 
     return (
         [(g, 1) for g in random.sample(positive_pool, k_pos)]
@@ -152,6 +174,12 @@ def build_pairs_dataset(
 
         query_genomes = list(zip(df["Accession"], df[rank]))
         candidate_genomes = partner_df["Accession"].tolist()
+        candidate_taxa = partner_df[rank].to_numpy()
+
+        matrices, row_of_genome = _similarity_matrices(genome_dict, representation)
+        query_rows = np.array([row_of_genome[g] for g, _ in query_genomes], dtype=np.int32)
+        candidate_rows = np.array([row_of_genome[g] for g in candidate_genomes], dtype=np.int32)
+        candidate_matrices = [matrix[candidate_rows].T.tocsr() for matrix in matrices]
 
     log(
         f"build_pairs_dataset: {len(query_genomes):,} query x {len(candidate_genomes):,} candidate genomes "
@@ -162,33 +190,49 @@ def build_pairs_dataset(
     skipped = 0
 
     with timed("build_pairs_dataset: all-vs-all similarity + partner selection"):
-        for genome_i, taxon_i in tqdm(query_genomes, desc="Building genome pairs"):
-            partners = _generate_pairs_for_genome(
-                genome_i=genome_i,
-                same_taxon_candidates=taxon_to_candidates.get(taxon_i, ()),
-                candidate_genomes=candidate_genomes,
-                genome_dict=genome_dict,
-                representation=representation,
-                k_pos=k_pos,
+        progress = tqdm(total=len(query_genomes), desc="Building genome pairs")
+
+        # Query genomes are handled in the original order, one block of
+        # similarity scores at a time, so the random draws are unchanged.
+        for start in range(0, len(query_genomes), SIMILARITY_BLOCK):
+            block = query_genomes[start:start + SIMILARITY_BLOCK]
+            similarity_block = _similarity_block(
+                matrices, candidate_matrices, query_rows[start:start + len(block)]
             )
 
-            if not partners:
-                skipped += 1
-                continue
+            for offset, (genome_i, taxon_i) in enumerate(block):
+                progress.update(1)
 
-            for genome_j, same_taxon in partners:
-                genome1, genome2 = (genome_j, genome_i) if cross_set else (genome_i, genome_j)
+                partners = _generate_pairs_for_genome(
+                    genome_i=genome_i,
+                    same_taxon_candidates=taxon_to_candidates.get(taxon_i, ()),
+                    candidate_genomes=candidate_genomes,
+                    candidate_taxa=candidate_taxa,
+                    taxon_i=taxon_i,
+                    similarities=similarity_block[offset],
+                    k_pos=k_pos,
+                )
 
-                rows.append({
-                    "genome1": genome1,
-                    "genome2": genome2,
-                    "same_taxon": same_taxon,
-                })
+                if not partners:
+                    skipped += 1
+                    continue
+
+                for genome_j, same_taxon in partners:
+                    genome1, genome2 = (genome_j, genome_i) if cross_set else (genome_i, genome_j)
+
+                    rows.append({
+                        "genome1": genome1,
+                        "genome2": genome2,
+                        "same_taxon": same_taxon,
+                    })
+
+        progress.close()
 
     # Feature sets and lookups are dead from here on; the frame built below is
     # the memory peak, so drop them before allocating it.
     with timed("build_pairs_dataset: free lookups"):
         del df, partner_df, genome_dict, taxon_to_candidates, query_genomes, candidate_genomes
+        del matrices, candidate_matrices, query_rows, candidate_rows, candidate_taxa
         gc.collect()
 
     with timed("build_pairs_dataset: dataframe construction"):

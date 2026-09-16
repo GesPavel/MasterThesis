@@ -7,9 +7,17 @@ matplotlib.use("Agg")  # figures are only ever written to disk, never shown
 import matplotlib.pyplot as plt
 
 
-# Escalating ceilings on the false positive rate. The threshold is picked under
-# the first budget that admits a non-trivial operating point.
+# Escalating ceilings on the false positive rate. Used as the fallback ladder
+# when the primary budget below admits no usable operating point.
 DEFAULT_FPR_BUDGETS = (0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50, 0.75, 1.0)
+
+# Budgets whose best operating point is recorded in the summary. Reporting all
+# of them makes the detection-rate / false-alarm trade-off visible without
+# refitting, which matters at ranks where a 5% budget is far too tight.
+REPORTED_FPR_BUDGETS = (0.05, 0.10, 0.15, 0.20)
+
+# The budget whose threshold is handed on to the evaluation stage.
+PRIMARY_FPR_BUDGET = 0.15
 
 # numpy >= 2 renamed trapz to trapezoid.
 _trapezoid = getattr(np, "trapezoid", None) or np.trapz
@@ -36,6 +44,10 @@ class NoveltyFitResult:
     chosen_index: int
     fpr_budget: float
 
+    # budget -> index into the curve arrays, or None when that budget admits no
+    # operating point with a non-zero true positive rate.
+    operating_points: dict
+
     n_novel: int
     n_known: int
 
@@ -49,6 +61,16 @@ class NoveltyFitResult:
         plt.close(self.roc_figure)
         plt.close(self.pr_figure)
 
+    def point(self, index) -> dict:
+        """The operating point at one index of the curve arrays."""
+        return {
+            "threshold": float(self.thresholds[index]),
+            "tpr": float(self.tpr[index]),
+            "fpr": float(self.fpr[index]),
+            "precision": float(self.precision[index]),
+            "recall": float(self.recall[index]),
+        }
+
     def summary(self) -> dict:
         """JSON-serialisable summary (no curve arrays, no figures)."""
         i = self.chosen_index
@@ -58,12 +80,18 @@ class NoveltyFitResult:
             "auprc": float(self.auprc),
             "score_column": self.score_column,
             "selection": {
-                "rule": "max TPR subject to FPR <= budget, smallest budget first",
+                "rule": "max TPR subject to FPR <= budget",
                 "fpr_budget": float(self.fpr_budget),
                 "tpr": float(self.tpr[i]),
                 "fpr": float(self.fpr[i]),
                 "precision": float(self.precision[i]),
                 "recall": float(self.recall[i]),
+            },
+            # Every reported budget, so the trade-off can be read off without a
+            # rerun. The chosen threshold above is one of these.
+            "operating_points": {
+                f"{budget:.2f}": (self.point(index) if index is not None else None)
+                for budget, index in self.operating_points.items()
             },
             "n_novel": int(self.n_novel),
             "n_known": int(self.n_known),
@@ -144,42 +172,48 @@ def compute_novelty_curves(df_assigned_taxa, use_normalized_probs):
     }
 
 
-def select_threshold_by_fpr_budget(curves, fpr_budgets=DEFAULT_FPR_BUDGETS):
+def best_point_within_budget(curves, budget):
     """
-    Highest-TPR operating point whose FPR fits inside a budget, trying the
-    budgets in the given (ascending) order.
+    Index of the highest-TPR operating point whose FPR fits inside `budget`,
+    or None when the budget admits none with a non-zero true positive rate.
 
-    A budget is only accepted if it admits a point with TPR > 0 -- the trivial
-    "predict nothing novel" point always has FPR = 0, so without that guard the
-    first budget would always win with a useless threshold. Ties on TPR are
-    broken by the lower FPR, then by the lower threshold.
-
-    Returns (chosen_index, budget_used).
+    The TPR > 0 guard matters: the trivial "predict nothing novel" point always
+    has FPR = 0, so without it every budget would look satisfiable by a useless
+    threshold. Ties on TPR are broken by the lower FPR, then the lower threshold.
     """
     tpr = curves["tpr"]
     fpr = curves["fpr"]
 
+    candidates = np.flatnonzero(fpr <= budget)
+    if len(candidates) == 0:
+        return None
+
+    best_tpr = tpr[candidates].max()
+    if best_tpr <= 0.0:
+        return None
+
+    candidates = candidates[tpr[candidates] == best_tpr]
+    candidates = candidates[fpr[candidates] == fpr[candidates].min()]
+
+    return int(candidates[0])
+
+
+def select_threshold_by_fpr_budget(curves, fpr_budgets=DEFAULT_FPR_BUDGETS):
+    """
+    Walk the budgets in ascending order and take the first that admits a usable
+    operating point. Returns (chosen_index, budget_used).
+    """
     for budget in fpr_budgets:
-        candidates = np.flatnonzero(fpr <= budget)
-        if len(candidates) == 0:
-            continue
+        index = best_point_within_budget(curves, budget)
+        if index is not None:
+            return index, float(budget)
 
-        best_tpr = tpr[candidates].max()
-        if best_tpr <= 0.0:
-            # No usable point at this budget -- relax to the next one.
-            continue
-
-        candidates = candidates[tpr[candidates] == best_tpr]
-        candidates = candidates[fpr[candidates] == fpr[candidates].min()]
-
-        return int(candidates[0]), float(budget)
-
-    # Every budget was degenerate (only reachable if no threshold gives TPR > 0);
-    # fall back to the most permissive point.
-    return int(len(tpr) - 1), float(fpr_budgets[-1])
+    # Only reachable if no threshold anywhere gives TPR > 0; fall back to the
+    # most permissive point.
+    return int(len(curves["tpr"]) - 1), float(fpr_budgets[-1])
 
 
-def plot_roc_curve(curves, chosen_index):
+def plot_roc_curve(curves, chosen_index, operating_points=None):
     fig, ax = plt.subplots(figsize=(6, 5.5))
 
     ax.plot(
@@ -202,6 +236,26 @@ def plot_roc_curve(curves, chosen_index):
             f"FPR = {curves['fpr'][chosen_index]:.3f}"
         ),
     )
+
+    # The budgets that were not chosen, so the trade-off is visible on the plot.
+    for budget, index in (operating_points or {}).items():
+        if index is None or index == chosen_index:
+            continue
+        ax.scatter(
+            [curves["fpr"][index]],
+            [curves["tpr"][index]],
+            facecolors="none",
+            edgecolors="#7f7f7f",
+            zorder=4,
+        )
+        ax.annotate(
+            f"{budget:.0%}",
+            (curves["fpr"][index], curves["tpr"][index]),
+            textcoords="offset points",
+            xytext=(5, -9),
+            fontsize=7,
+            color="#7f7f7f",
+        )
 
     ax.set_xlim(-0.02, 1.02)
     ax.set_ylim(-0.02, 1.02)
@@ -263,15 +317,33 @@ def fit_novelty_threshold(
     df_assigned_taxa,
     use_normalized_probs,
     fpr_budgets=DEFAULT_FPR_BUDGETS,
+    reported_budgets=REPORTED_FPR_BUDGETS,
+    primary_budget=PRIMARY_FPR_BUDGET,
 ):
     """
-    Full novelty fit: ROC + PRC over every threshold, their areas, the selected
-    threshold and the two plots.
+    Full novelty fit: ROC + PRC over every threshold, their areas, the best
+    operating point at each reported budget, and the two plots.
+
+    The threshold handed downstream is the one at `primary_budget`. The tighter
+    and looser budgets are still recorded, because at fine ranks a 5% budget can
+    leave the detection rate near zero and the trade-off needs to be visible.
 
     The caller owns the returned figures and is responsible for closing them.
     """
     curves = compute_novelty_curves(df_assigned_taxa, use_normalized_probs)
-    chosen_index, budget = select_threshold_by_fpr_budget(curves, fpr_budgets)
+
+    operating_points = {
+        budget: best_point_within_budget(curves, budget)
+        for budget in reported_budgets
+    }
+
+    chosen_index = operating_points.get(primary_budget)
+    if chosen_index is not None:
+        budget = float(primary_budget)
+    else:
+        # The primary budget is unusable here; relax upwards from it.
+        ladder = [b for b in fpr_budgets if b > primary_budget] or list(fpr_budgets)
+        chosen_index, budget = select_threshold_by_fpr_budget(curves, ladder)
 
     return NoveltyFitResult(
         threshold=float(curves["thresholds"][chosen_index]),
@@ -285,8 +357,9 @@ def fit_novelty_threshold(
         recall=curves["recall"],
         chosen_index=chosen_index,
         fpr_budget=budget,
+        operating_points=operating_points,
         n_novel=curves["n_novel"],
         n_known=curves["n_known"],
-        roc_figure=plot_roc_curve(curves, chosen_index),
+        roc_figure=plot_roc_curve(curves, chosen_index, operating_points),
         pr_figure=plot_precision_recall_curve(curves, chosen_index),
     )
