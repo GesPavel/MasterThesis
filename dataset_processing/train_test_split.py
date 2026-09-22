@@ -125,11 +125,17 @@ def load_dataset_split(
     # ---------------------------------------------------
     # Determine known taxa for downstream usage
     # ---------------------------------------------------
-    known_taxa = (
-        set(true_train_df[taxonomy_rank])
-        | set(calibration_df[taxonomy_rank])
-        | set(novelty_fit_seen[taxonomy_rank])
-    )
+    # A taxon is known only if it has genomes in true_train. At prediction time
+    # the candidate taxa are exactly the taxa of true_train, so this makes
+    # "known" mean "the model can actually predict it".
+    #
+    # Taxa present only in the calibration or novelty-fit subsets used to count
+    # as known too. Their test genomes were then labelled seen while being
+    # impossible to assign: no training genome of that taxon exists to match
+    # against. That scored them as wrong in every assignment metric, as false
+    # alarms when the model correctly found no match, and fed them into the
+    # threshold fit as known examples that behave like novel ones.
+    known_taxa = set(true_train_df[taxonomy_rank])
 
     known_taxa_df = pd.DataFrame({
         "taxon": list(known_taxa)
@@ -150,8 +156,13 @@ def load_dataset_split(
     print(f"External test genomes: {len(test_df)}")
     print()
 
+    held_out_only = (
+        set(calibration_df[taxonomy_rank]) | set(novelty_fit_seen[taxonomy_rank])
+    ) - known_taxa
+
     print(f"Known taxa: {len(known_taxa)}")
     print(f"Novelty-fit unseen taxa: {len(unseen_taxa)}")
+    print(f"Taxa only in calibration / novelty-fit (treated as novel): {len(held_out_only)}")
     print()
 
     return (

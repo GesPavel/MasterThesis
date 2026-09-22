@@ -1,15 +1,10 @@
-import joblib
 import numpy as np
-import pandas as pd
 from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import log_loss, accuracy_score, classification_report
 
 from xgboost import XGBClassifier
 
 from dataset_processing.hmm_pipeline.hmm_data_processing import compute_features
 from dataset_processing.hmm_pipeline.hmm_data_processing import build_name_to_feature_dict
-from dataset_processing.timing import timed
 
 
 def _build_model(model_type, model_config, random_seed=42):
@@ -74,21 +69,18 @@ def train_probability_model(
     representation,
     random_seed=42
 ):
-    with timed("train: genome lookup"):
-        genome_dict = build_name_to_feature_dict(df, representation)
+    genome_dict = build_name_to_feature_dict(df, representation)
 
-    with timed("train: compute_features"):
-        X_train, y_train, _, _ = compute_features(
-            pairs_df,
-            genome_dict,
-            feature_config,
-            representation=representation
-        )
+    X_train, y_train, _, _ = compute_features(
+        pairs_df,
+        genome_dict,
+        feature_config,
+        representation=representation
+    )
 
     model = _build_model(model_type, model_config, random_seed=random_seed)
 
-    with timed(f"train: model.fit ({model_type})"):
-        model.fit(X_train, y_train)
+    model.fit(X_train, y_train)
 
     report_lines = []
     report_lines.append("=" * 80)

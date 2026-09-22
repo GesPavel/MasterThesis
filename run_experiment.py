@@ -10,6 +10,8 @@ import pandas as pd
 from dataset_processing.hmm_pipeline.ground_truth_extraction import build_pairs_dataset
 from dataset_processing.hmm_pipeline.novelty_fit import (
     DEFAULT_FPR_BUDGETS,
+    PRIMARY_FPR_BUDGET,
+    REPORTED_FPR_BUDGETS,
     fit_novelty_threshold,
 )
 from dataset_processing.hmm_pipeline.probability_model_calibration import calibrate_model
@@ -30,7 +32,6 @@ from dataset_processing.paths import (
     get_novelty_threshold_path,
     get_top_candidates_path,
 )
-from dataset_processing.timing import timed, log
 
 
 # =========================
@@ -99,27 +100,25 @@ def run_pair_generation_stage(config: dict, true_train_df, calibration_df):
     representation = config["data"]["representation"]
 
     print("--- Generating pairs for true_train ---")
-    with timed("pairs: true_train"):
-        train_pairs_df = build_pairs_dataset(
-            df=true_train_df,
-            rank=taxon_rank,
-            representation=representation,
-            k_pos=config["pair_generation"]["k_pos"],
-            random_seed=config["experiment"]["random_seed"],
-        )
+    train_pairs_df = build_pairs_dataset(
+        df=true_train_df,
+        rank=taxon_rank,
+        representation=representation,
+        k_pos=config["pair_generation"]["k_pos"],
+        random_seed=config["experiment"]["random_seed"],
+    )
 
     # Calibration genomes are paired against the training set, not against each
     # other: that is the setting the model actually faces at prediction time.
     print("--- Generating pairs for calibration (against true_train) ---")
-    with timed("pairs: calibration"):
-        val_pairs_df = build_pairs_dataset(
-            df=calibration_df,
-            rank=taxon_rank,
-            representation=representation,
-            partner_df=true_train_df,
-            k_pos=config["pair_generation"]["k_pos"],
-            random_seed=config["experiment"]["random_seed"],
-        )
+    val_pairs_df = build_pairs_dataset(
+        df=calibration_df,
+        rank=taxon_rank,
+        representation=representation,
+        partner_df=true_train_df,
+        k_pos=config["pair_generation"]["k_pos"],
+        random_seed=config["experiment"]["random_seed"],
+    )
 
     return train_pairs_df, val_pairs_df
 
@@ -193,10 +192,6 @@ def _predict_and_assign_subset(
     chunk_size = max(1, MAX_PAIRS_PER_CHUNK // max(1, n_train))
     n_chunks = (len(subset_df) + chunk_size - 1) // chunk_size
 
-    log(
-        f"{subset_name}: {len(subset_df):,} test x {n_train:,} train genomes "
-        f"= {len(subset_df) * n_train:,} pairs, {n_chunks} chunk(s) of <= {chunk_size:,} test genomes"
-    )
 
     chunk_results = []
 
@@ -208,35 +203,31 @@ def _predict_and_assign_subset(
             f"({len(chunk_df):,} test genomes) ---"
         )
 
-        with timed(f"predict: {subset_name} chunk {chunk_index + 1}/{n_chunks}"):
-            df_probabilities = predict_probabilities(
-                df_train=true_train_df,
-                df_test=chunk_df,
-                model=model,
-                taxon_rank=config["data"]["taxon_rank"],
-                feature_config=config["features"],
-                representation=config["data"]["representation"],
-            )
+        df_probabilities = predict_probabilities(
+            df_train=true_train_df,
+            df_test=chunk_df,
+            model=model,
+            taxon_rank=config["data"]["taxon_rank"],
+            feature_config=config["features"],
+            representation=config["data"]["representation"],
+        )
 
-        with timed(f"assign: {subset_name} chunk {chunk_index + 1}/{n_chunks}"):
-            chunk_results.append(
-                aggregate_and_summarize(
-                    df_probabilities=df_probabilities,
-                    aggregation_config=config["aggregation"],
-                    known_taxa=known_taxa,
-                    n_top_candidates=n_top_candidates,
-                )
+        chunk_results.append(
+            aggregate_and_summarize(
+                df_probabilities=df_probabilities,
+                aggregation_config=config["aggregation"],
+                known_taxa=known_taxa,
+                n_top_candidates=n_top_candidates,
             )
+        )
 
-        with timed(f"free probability table: {subset_name} chunk {chunk_index + 1}/{n_chunks}"):
-            del df_probabilities, chunk_df
-            gc.collect()
+        del df_probabilities, chunk_df
+        gc.collect()
 
     if len(chunk_results) == 1:
         return chunk_results[0]
 
-    with timed(f"concat chunk results: {subset_name}"):
-        return pd.concat(chunk_results, ignore_index=True)
+    return pd.concat(chunk_results, ignore_index=True)
 
 
 def run_prediction_and_assignment_stages(
@@ -262,15 +253,13 @@ def run_prediction_and_assignment_stages(
         if subset_name == "novelty_fit":
             subset_df = novelty_fit_df
         else:
-            with timed(f"load test pickle: {subset_name}"):
-                subset_df = load_scenario_pickle(config, scenario, subset_name)
+            subset_df = load_scenario_pickle(config, scenario, subset_name)
 
-        with timed(f"subset total: {subset_name}"):
-            assignments[subset_name] = _predict_and_assign_subset(
-                config, model, true_train_df, subset_df, known_taxa, subset_name,
-                # Only the main test set carries the candidate ranking.
-                n_top_candidates=N_TOP_CANDIDATES if subset_name == MAIN_TEST_VARIANT else 0,
-            )
+        assignments[subset_name] = _predict_and_assign_subset(
+            config, model, true_train_df, subset_df, known_taxa, subset_name,
+            # Only the main test set carries the candidate ranking.
+            n_top_candidates=N_TOP_CANDIDATES if subset_name == MAIN_TEST_VARIANT else 0,
+        )
 
         if subset_name != "novelty_fit":
             del subset_df
@@ -304,13 +293,16 @@ def run_novelty_fit_stage(config: dict, work_dir: Path, novelty_fit_results):
 
     use_normalized_probs = config["novelty"]["use_normalized_probabilities"]
     fpr_budgets = config["novelty"].get("max_fpr_budgets") or DEFAULT_FPR_BUDGETS
+    reported_budgets = config["novelty"].get("reported_fpr_budgets") or REPORTED_FPR_BUDGETS
+    primary_budget = config["novelty"].get("primary_fpr_budget") or PRIMARY_FPR_BUDGET
 
-    with timed("novelty threshold search"):
-        result = fit_novelty_threshold(
-            novelty_fit_results,
-            use_normalized_probs=use_normalized_probs,
-            fpr_budgets=fpr_budgets,
-        )
+    result = fit_novelty_threshold(
+        novelty_fit_results,
+        use_normalized_probs=use_normalized_probs,
+        fpr_budgets=fpr_budgets,
+        reported_budgets=reported_budgets,
+        primary_budget=primary_budget,
+    )
 
     roc_path = get_novelty_roc_curve_path(work_dir)
     pr_path = get_novelty_pr_curve_path(work_dir)
@@ -327,6 +319,17 @@ def run_novelty_fit_stage(config: dict, work_dir: Path, novelty_fit_results):
         f"{result.fpr_budget:.0%})"
     )
     print(f"    AUROC: {result.auroc:.4f}    AUPRC: {result.auprc:.4f}")
+    print("    Operating point per FPR budget:")
+    for budget, index in result.operating_points.items():
+        if index is None:
+            print(f"      FPR <= {budget:.0%}: no usable point")
+            continue
+        mark = "  <- used" if index == result.chosen_index else ""
+        print(
+            f"      FPR <= {budget:.0%}: TPR {result.tpr[index]:.4f} "
+            f"at FPR {result.fpr[index]:.4f}, precision {result.precision[index]:.4f}, "
+            f"threshold {result.thresholds[index]:.6g}{mark}"
+        )
     print(f"    Threshold summary written to {threshold_path}")
     print(f"    Curves written to {roc_path} and {pr_path}")
 
@@ -343,10 +346,9 @@ def run_evaluation_stage(config: dict, scenario, work_dir: Path, assignments: di
     for variant in discover_test_variants(config, scenario):
         print(f"--- Evaluating test variant: {variant} ---")
 
-        with timed(f"eval: {variant}"):
-            metrics = evaluate_assignment_results(
-                assignments[variant], threshold, use_normalized_probs
-            )
+        metrics = evaluate_assignment_results(
+            assignments[variant], threshold, use_normalized_probs
+        )
 
         metrics_path = get_metrics_path(work_dir, variant)
         with open(metrics_path, "w") as f:
@@ -376,50 +378,40 @@ def run_scenario_pipeline(config: dict, scenario, work_dir: Path):
     Run the full pipeline for a single scenario. Everything except the final
     metrics is kept in memory and handed from stage to stage.
     """
-    with timed(f"load train pickle (scenario {scenario})"):
-        train_df = load_scenario_pickle(config, scenario, "train")
-    log(f"train pickle: {len(train_df):,} genomes")
+    train_df = load_scenario_pickle(config, scenario, "train")
 
-    with timed("stage: split"):
-        true_train_df, calibration_df, novelty_fit_df, known_taxa = run_split_stage(
-            config, train_df
-        )
+    true_train_df, calibration_df, novelty_fit_df, known_taxa = run_split_stage(
+        config, train_df
+    )
 
     # The full train pickle is no longer needed; drop the reference so the
     # subsets are the only thing held.
     del train_df
     gc.collect()
 
-    with timed("stage: pairs"):
-        train_pairs_df, val_pairs_df = run_pair_generation_stage(
-            config, true_train_df, calibration_df
-        )
+    train_pairs_df, val_pairs_df = run_pair_generation_stage(
+        config, true_train_df, calibration_df
+    )
 
-    with timed("stage: train"):
-        model = run_training_stage(config, true_train_df, train_pairs_df)
+    model = run_training_stage(config, true_train_df, train_pairs_df)
 
-    with timed("stage: calibrate"):
-        model = run_calibration_stage(
-            config, calibration_df, true_train_df, val_pairs_df, model
-        )
+    model = run_calibration_stage(
+        config, calibration_df, true_train_df, val_pairs_df, model
+    )
 
     # Pair tables and the calibration subset are only inputs to train/calibrate.
     del train_pairs_df, val_pairs_df, calibration_df
     gc.collect()
 
-    with timed("stage: probability_prediction + assign"):
-        assignments = run_prediction_and_assignment_stages(
-            config, scenario, model, true_train_df, novelty_fit_df, known_taxa
-        )
+    assignments = run_prediction_and_assignment_stages(
+        config, scenario, model, true_train_df, novelty_fit_df, known_taxa
+    )
 
-    with timed("stage: top candidates"):
-        save_top_candidates(work_dir, assignments)
+    save_top_candidates(work_dir, assignments)
 
-    with timed("stage: novelty_fit"):
-        threshold = run_novelty_fit_stage(config, work_dir, assignments["novelty_fit"])
+    threshold = run_novelty_fit_stage(config, work_dir, assignments["novelty_fit"])
 
-    with timed("stage: eval"):
-        run_evaluation_stage(config, scenario, work_dir, assignments, threshold)
+    run_evaluation_stage(config, scenario, work_dir, assignments, threshold)
 
 
 def run_experiment(config_path: Path):
@@ -429,18 +421,16 @@ def run_experiment(config_path: Path):
     scenarios = resolve_scenarios(config)
     multi_scenario = len(scenarios) > 1
 
-    with timed("whole experiment"):
-        for scenario in scenarios:
-            print(f"\n########## SCENARIO {scenario} ##########")
+    for scenario in scenarios:
+        print(f"\n########## SCENARIO {scenario} ##########")
 
-            # Flat layout for a single scenario; per-scenario subdirs when running all.
-            if multi_scenario:
-                work_dir = ensure_dir(exp_dir / f"scenario{scenario}")
-            else:
-                work_dir = exp_dir
+        # Flat layout for a single scenario; per-scenario subdirs when running all.
+        if multi_scenario:
+            work_dir = ensure_dir(exp_dir / f"scenario{scenario}")
+        else:
+            work_dir = exp_dir
 
-            with timed(f"scenario {scenario}"):
-                run_scenario_pipeline(config, scenario, work_dir)
+        run_scenario_pipeline(config, scenario, work_dir)
 
     print(f"Experiment finished successfully. Metrics in: {exp_dir}")
 

@@ -2,8 +2,66 @@ import pickle
 import random
 from pathlib import Path
 
-import pandas as pd
 from Bio import SeqIO
+
+
+def _split_pickle_file(source_path, destination_path, accession_ids, accession_col="Accession"):
+    with open(source_path, "rb") as f:
+        df = pickle.load(f)
+
+    if accession_col not in df.columns:
+        raise KeyError(f"Column '{accession_col}' not found in {source_path}")
+
+    subset_df = df[df[accession_col].isin(accession_ids)].copy()
+    subset_df.to_pickle(destination_path)
+
+
+def _split_sequence_file(source_path, destination_path, accession_ids):
+    records = [
+        record
+        for record in SeqIO.parse(source_path, "fasta")
+        if record.id in accession_ids
+    ]
+    SeqIO.write(records, destination_path, "fasta")
+
+
+def _split_additional_testing_files(
+    additional_testing_input_dir,
+    output_dir,
+    accession_ids,
+    accession_col="Accession",
+):
+    if additional_testing_input_dir is None:
+        return []
+
+    additional_testing_input_dir = Path(additional_testing_input_dir)
+    additional_output_dir = output_dir / "additional_testing"
+    additional_output_dir.mkdir(parents=True, exist_ok=True)
+
+    written_files = []
+
+    for source_path in sorted(additional_testing_input_dir.iterdir()):
+        if not source_path.is_file():
+            continue
+
+        suffix = source_path.suffix.lower()
+        destination_path = additional_output_dir / source_path.name
+
+        if suffix in {".pkl", ".pickle"}:
+            _split_pickle_file(
+                source_path,
+                destination_path,
+                accession_ids,
+                accession_col=accession_col,
+            )
+        elif suffix in {".fasta", ".fa", ".faa"}:
+            _split_sequence_file(source_path, destination_path, accession_ids)
+        else:
+            continue
+
+        written_files.append(destination_path)
+
+    return written_files
 
 
 def scenario3_split(
@@ -13,6 +71,8 @@ def scenario3_split(
     taxonomy_rank="Family",
     test_fraction=0.2,
     random_seed=42,
+    faa_path=None,
+    additional_testing_input_dir=None,
 ):
     """
     Scenario 3:
@@ -28,6 +88,8 @@ def scenario3_split(
         - No taxon overlap between train/test
         - No genome overlap between train/test
         - Balanced taxon-size sampling using buckets
+        - Optional FAA and additional testing files are split using the final
+          test genomes
     """
 
     random.seed(random_seed)
@@ -140,34 +202,32 @@ def scenario3_split(
     test_df.to_pickle(test_pickle)
 
     # ---------------------------------------------------
-    # Load FASTA
+    # Load sequence files
     # ---------------------------------------------------
-    fasta_records = list(SeqIO.parse(fasta_path, "fasta"))
+    sequence_inputs = [fasta_path]
+    if faa_path is not None:
+        sequence_inputs.append(faa_path)
 
-    # ---------------------------------------------------
-    # Split FASTA
-    # ---------------------------------------------------
-    train_records = []
-    test_records = []
+    sequence_outputs = []
 
-    for record in fasta_records:
+    for sequence_input in sequence_inputs:
+        source_path = Path(sequence_input)
+        output_suffix = source_path.suffix or ".fasta"
 
-        record_id = record.id
+        train_sequence_path = output_dir / f"train{output_suffix}"
+        test_sequence_path = output_dir / f"test{output_suffix}"
 
-        if record_id in train_ids:
-            train_records.append(record)
+        _split_sequence_file(source_path, train_sequence_path, train_ids)
+        _split_sequence_file(source_path, test_sequence_path, test_ids)
 
-        elif record_id in test_ids:
-            test_records.append(record)
+        sequence_outputs.extend([train_sequence_path, test_sequence_path])
 
-    # ---------------------------------------------------
-    # Save FASTA
-    # ---------------------------------------------------
-    train_fasta = output_dir / "train.fasta"
-    test_fasta = output_dir / "test.fasta"
-
-    SeqIO.write(train_records, train_fasta, "fasta")
-    SeqIO.write(test_records, test_fasta, "fasta")
+    additional_output_files = _split_additional_testing_files(
+        additional_testing_input_dir,
+        output_dir,
+        test_ids,
+        accession_col=accession_col,
+    )
 
     # ---------------------------------------------------
     # Summary
@@ -188,8 +248,14 @@ def scenario3_split(
 
     print(f"Train pickle: {train_pickle}")
     print(f"Test pickle: {test_pickle}")
-    print(f"Train FASTA:  {train_fasta}")
-    print(f"Test FASTA:   {test_fasta}")
+
+    for sequence_output in sequence_outputs:
+        print(f"Sequence file: {sequence_output}")
+
+    if additional_output_files:
+        print(f"Additional testing files: {len(additional_output_files)}")
+        for additional_file in additional_output_files:
+            print(f"  {additional_file}")
 
 
 if __name__ == "__main__":
@@ -201,4 +267,6 @@ if __name__ == "__main__":
         taxonomy_rank="Genus",
         test_fraction=0.3,
         random_seed=42,
+        faa_path=None,
+        additional_testing_input_dir=None,
     )

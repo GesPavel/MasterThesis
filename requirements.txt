@@ -6,3 +6,5 @@ joblib
 xgboost
 pyyaml
 biopython
+scipy
+matplotlib

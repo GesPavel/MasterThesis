@@ -1,7 +1,6 @@
 import numpy as np
 from scipy import sparse
 
-from dataset_processing.timing import timed, log
 
 
 # Slice size for the pairwise intersection loop, in matrix nonzeros. Each slice
@@ -148,52 +147,40 @@ def _compute_feature_block(matrix, rows1, rows2, feature_config):
 
 
 def compute_features(pairs_df, genome_dict, feature_config, representation="hmm", process_target_var=True):
-    log(f"compute_features: {len(pairs_df):,} pairs, representation={representation}")
 
-    with timed("compute_features: total"):
-        with timed("compute_features: pair column extraction"):
-            g1_all = pairs_df["genome1"].to_numpy()
-            g2_all = pairs_df["genome2"].to_numpy()
+    g1_all = pairs_df["genome1"].to_numpy()
+    g2_all = pairs_df["genome2"].to_numpy()
 
-            genome_list_1 = g1_all.tolist()
-            genome_list_2 = g2_all.tolist()
+    genome_list_1 = g1_all.tolist()
+    genome_list_2 = g2_all.tolist()
 
-        if representation in {"hmm", "pc"}:
-            with timed("compute_features: hit matrix"):
-                matrix, row_of_genome = _build_hit_matrix(genome_dict)
+    if representation in {"hmm", "pc"}:
+        matrix, row_of_genome = _build_hit_matrix(genome_dict)
 
-            with timed("compute_features: row lookup"):
-                rows1 = _row_indices(row_of_genome, g1_all)
-                rows2 = _row_indices(row_of_genome, g2_all)
+        rows1 = _row_indices(row_of_genome, g1_all)
+        rows2 = _row_indices(row_of_genome, g2_all)
 
-            with timed("compute_features: feature block"):
-                X = _compute_feature_block(matrix, rows1, rows2, feature_config)
+        X = _compute_feature_block(matrix, rows1, rows2, feature_config)
 
-        elif representation == "hybrid":
-            with timed("compute_features: hit matrix"):
-                matrix_hmm, row_of_genome = _build_hit_matrix(genome_dict, key="hmm")
-                matrix_pc, _ = _build_hit_matrix(genome_dict, key="pc")
+    elif representation == "hybrid":
+        matrix_hmm, row_of_genome = _build_hit_matrix(genome_dict, key="hmm")
+        matrix_pc, _ = _build_hit_matrix(genome_dict, key="pc")
 
-            with timed("compute_features: row lookup"):
-                rows1 = _row_indices(row_of_genome, g1_all)
-                rows2 = _row_indices(row_of_genome, g2_all)
+        rows1 = _row_indices(row_of_genome, g1_all)
+        rows2 = _row_indices(row_of_genome, g2_all)
 
-            with timed("compute_features: feature block (hmm)"):
-                X_hmm = _compute_feature_block(matrix_hmm, rows1, rows2, feature_config)
+        X_hmm = _compute_feature_block(matrix_hmm, rows1, rows2, feature_config)
 
-            with timed("compute_features: feature block (pc)"):
-                X_pc = _compute_feature_block(matrix_pc, rows1, rows2, feature_config)
+        X_pc = _compute_feature_block(matrix_pc, rows1, rows2, feature_config)
 
-            with timed("compute_features: hstack"):
-                X = np.hstack([X_hmm, X_pc])
+        X = np.hstack([X_hmm, X_pc])
 
-        else:
-            raise ValueError(f"Unsupported representation: {representation}")
+    else:
+        raise ValueError(f"Unsupported representation: {representation}")
 
-        y = None
-        if process_target_var:
-            y = pairs_df["same_taxon"].to_numpy()
+    y = None
+    if process_target_var:
+        y = pairs_df["same_taxon"].to_numpy()
 
-    log(f"compute_features: X shape {X.shape}")
 
     return X, y, genome_list_1, genome_list_2

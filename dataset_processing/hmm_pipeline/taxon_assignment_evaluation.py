@@ -1,3 +1,95 @@
+import numpy as np
+from sklearn.metrics import precision_recall_fscore_support
+
+
+def _assignment_quality(seen_group):
+    """
+    Top-1 assignment quality over the genomes whose taxon is actually known.
+
+    Micro and macro answer different questions. Micro pools every genome into
+    one tally, so big taxa dominate it. Macro scores each taxon separately and
+    averages, so a taxon holding two genomes counts as much as one holding two
+    hundred -- which is the honest view when taxon sizes are as skewed as they
+    are here.
+
+    Note that micro precision, recall and F1 are all equal to plain accuracy in
+    this setting: every genome gets exactly one predicted taxon, so a wrong
+    prediction is simultaneously one false positive for the taxon guessed and
+    one false negative for the taxon missed. They are reported because readers
+    expect the set, not because they carry three separate pieces of information.
+    """
+    y_true = seen_group["true_taxon"].to_numpy()
+    y_pred = seen_group["predicted_taxon"].to_numpy()
+
+    micro_p, micro_r, micro_f1, _ = precision_recall_fscore_support(
+        y_true, y_pred, average="micro", zero_division=0
+    )
+    macro_p, macro_r, macro_f1, _ = precision_recall_fscore_support(
+        y_true, y_pred, average="macro", zero_division=0
+    )
+
+    metrics = {
+        "assignment_accuracy_micro": float(micro_p),
+        "assignment_precision_micro": float(micro_p),
+        "assignment_recall_micro": float(micro_r),
+        "assignment_f1_micro": float(micro_f1),
+
+        # Mean per-class recall, which is what "accuracy averaged over classes"
+        # means and is the same number as macro recall by definition.
+        "assignment_accuracy_macro": float(macro_r),
+        "assignment_precision_macro": float(macro_p),
+        "assignment_recall_macro": float(macro_r),
+        "assignment_f1_macro": float(macro_f1),
+
+        # Macro averages over every taxon appearing as a true or a predicted
+        # label, so predicting into a taxon that holds no test genome still
+        # costs precision.
+        "n_classes_evaluated": int(len(set(y_true.tolist()) | set(y_pred.tolist()))),
+        "n_true_classes": int(len(set(y_true.tolist()))),
+    }
+
+    # ---- rank-based scores ----
+    rank = seen_group["target_rank"].to_numpy(dtype=float)
+    found = ~np.isnan(rank)
+
+    # A genome whose true taxon never appeared as a candidate scores 0, the
+    # usual convention: there is no rank to take a reciprocal of.
+    reciprocal = np.zeros(len(rank), dtype=float)
+    reciprocal[found] = 1.0 / rank[found]
+    metrics["mrr"] = float(reciprocal.mean())
+
+    # Rank as a fraction of the candidate list: 0 is first, 1 is last. Absolute
+    # ranks are not comparable across ranks or subsets, since the number of
+    # candidate taxa differs; this is.
+    n_candidates = seen_group["n_candidates"].to_numpy(dtype=float)
+    spread = np.maximum(n_candidates - 1.0, 1.0)
+    normalized = (rank - 1.0) / spread
+
+    # Averaged over the genomes whose taxon was found at all, so it is not
+    # silently mixing in a "worst possible" value for the ones that were not.
+    metrics["n_target_found"] = int(found.sum())
+    metrics["target_found_fraction"] = float(found.mean()) if len(rank) else 0.0
+    metrics["mean_normalized_rank"] = float(np.nanmean(normalized[found])) if found.any() else 0.0
+    metrics["median_normalized_rank"] = float(np.nanmedian(normalized[found])) if found.any() else 0.0
+
+    return metrics
+
+
+def _empty_assignment_quality():
+    """Placeholders for a subset with no genomes of a known taxon."""
+    keys = [
+        "assignment_accuracy_micro", "assignment_precision_micro",
+        "assignment_recall_micro", "assignment_f1_micro",
+        "assignment_accuracy_macro", "assignment_precision_macro",
+        "assignment_recall_macro", "assignment_f1_macro",
+        "mrr", "target_found_fraction",
+        "mean_normalized_rank", "median_normalized_rank",
+    ]
+    metrics = {key: 0.0 for key in keys}
+    metrics.update(n_classes_evaluated=0, n_true_classes=0, n_target_found=0)
+    return metrics
+
+
 def evaluate_assignment_results(df_results, novelty_threshold, use_normalized_probs):
     metrics: dict[str, dict[str, float | int]] = {}
 
@@ -40,6 +132,7 @@ def evaluate_assignment_results(df_results, novelty_threshold, use_normalized_pr
 
         # ---- Rank-based assignment metrics (seen genomes only) ----
         if len(seen_group) > 0:
+            result.update(_assignment_quality(seen_group))
             result.update({
                 "top1": float(seen_group["top1_correct"].mean()),
                 "top2": float(seen_group["top2_correct"].mean()),
@@ -50,6 +143,7 @@ def evaluate_assignment_results(df_results, novelty_threshold, use_normalized_pr
                 "mean_true_score": float(seen_group["target_score"].mean()),
             })
         else:
+            result.update(_empty_assignment_quality())
             result.update({
                 "top1": 0.0,
                 "top2": 0.0,

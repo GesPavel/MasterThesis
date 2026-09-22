@@ -88,6 +88,10 @@ def _summarize_per_genome(df_scores, known_taxa, n_top_candidates=0):
             "top_score": top_score,     # raw aggregated score
             "top_prob": top_prob,       # normalized probability
             "is_actually_novel": is_actually_novel,
+            # How many taxa this genome was ranked against. Needed to turn an
+            # absolute rank into a normalized one, since the candidate count
+            # differs between ranks and between subsets.
+            "n_candidates": len(candidate_taxa),
         }
 
         # determine what the "true label" is

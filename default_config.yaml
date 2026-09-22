@@ -1,11 +1,9 @@
 experiment:
-  name: "hmm_logreg_family_max_aggregation_clean_run"
+  name: "default_run"
   parent_experiment_name:
-  description: "HMM + Logistical Regression + max aggregation for families (clean run)"
+  description: "Default settings: sigmoid calibration, best-hit aggregation, 15% FPR budget"
   random_seed: 42
-
-
-     # where experiment dirs are written (e.g. F:/experiments)
+  output_root: "G:/experiments"     # where experiment dirs are written
 
 data:
   data_root: "G:/output_root"       # path to all datasets
@@ -21,17 +19,17 @@ pair_generation:
   # Per genome: up to k_pos same-taxon partners, ceil(k_pos/2) hard (most
   # similar) wrong-taxon negatives and floor(k_pos/2) random ones.
   k_pos: 10
-  similarity_metric: "shared_count"   # shared_count | jaccard
 
 features:
   use_intersection: true
   use_jaccard: true
   use_len1: true
   use_len2: true
+  use_abs_len_diff: true
 
+model:
+  type: "logreg"              # logreg | xgboost
 
-training:
-  type: 'logreg'              # logreg | xgboost
   logreg:
     max_iter: 1000
     C: 1.0
@@ -46,17 +44,32 @@ training:
     eval_metric: "logloss"
 
 calibration:
-  method: "isotonic"         # sigmoid | isotonic
+  # Sigmoid keeps the score continuous. Isotonic is a step function whose few
+  # output levels collapse the score resolution -- measured at 34 usable
+  # thresholds against sigmoid's 1253 on the same data.
+  method: "sigmoid"           # sigmoid | isotonic
 
 aggregation:
-  method: "logit_sum"              # mean | median | max | logit_sum | topk_mean
-  topk_values: [1]         # null = use all, or e.g. [3, 5, 10]
+  method: "logit_sum"         # mean | median | max | logit_sum | topk_mean
+  # Best-hit only. Summing more matches per taxon adds noise rather than
+  # evidence: measured monotone losses in both assignment (Family s4 top-1
+  # 0.9456 -> 0.8565 at topk 10) and novelty recall (s3 0.9284 -> 0.6157).
+  # NOTE: more than one value here makes the novelty threshold meaningless --
+  # the ROC would be built across mixed score scales. Keep it to a single value.
+  topk_values: [ 1 ]          # null = use all
 
 novelty:
   use_normalized_probabilities: false
-  # The threshold is the highest-TPR point whose FPR fits the first of these
-  # budgets that admits a non-trivial operating point.
+
+  # Operating points recorded for each of these budgets, so the detection-rate
+  # / false-alarm trade-off is readable without refitting.
+  reported_fpr_budgets: [0.05, 0.10, 0.15, 0.20]
+
+  # The budget whose threshold is handed to the evaluation stage. 5% leaves most
+  # of the detection rate unused at fine ranks -- at Genus it costs five sixths
+  # of the TPR for no precision gain.
+  primary_fpr_budget: 0.15
+
+  # Fallback ladder, only consulted when the primary budget admits no usable
+  # operating point.
   max_fpr_budgets: [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50, 0.75, 1.0]
-#evaluation:
-#  top_k: [1, 2, 3]
-#  small_family_threshold: 6
