@@ -30,7 +30,7 @@ Note that data generation is currently impossible, as the repository does not co
 For training and evaluation of the model use this command:
 
 ```bash
-python run_experiment.py --config <config.yaml>
+python run_train_and_eval.py --config <config.yaml>
 ```
 
 Default config is located in the root of the repository.
